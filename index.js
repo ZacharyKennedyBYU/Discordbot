@@ -9,6 +9,17 @@ let config;
 try {
     const configFile = fs.readFileSync('./config.json', 'utf8');
     config = JSON.parse(configFile);
+
+    // Read from .txt files if they exist, to avoid JSON escaping issues with quotes/newlines
+    if (fs.existsSync('./system.txt')) {
+        config.system_prompt = fs.readFileSync('./system.txt', 'utf8');
+    }
+    if (fs.existsSync('./character.txt')) {
+        config.character_prompt = fs.readFileSync('./character.txt', 'utf8');
+    }
+    if (fs.existsSync('./prefill.txt')) {
+        config.prefill = fs.readFileSync('./prefill.txt', 'utf8');
+    }
 } catch (error) {
     console.error('[Error] Could not read config.json. Please make sure the file exists and is valid JSON.', error.message);
     process.exit(1);
@@ -62,10 +73,10 @@ function checkOpenRouterBalance() {
                     if (parsed.data) {
                         const limit = parsed.data.limit;
                         const usage = parsed.data.usage;
-                        
+
                         let limitStr = limit !== null ? `$${parseFloat(limit).toFixed(4)}` : 'Unknown Limit';
                         let usageStr = usage !== null ? `$${parseFloat(usage).toFixed(4)}` : 'Unknown Usage';
-                        
+
                         console.log(`[Info] OpenRouter Key Usage - Used: ${usageStr} / Limit: ${limitStr}`);
                     }
                 } catch (e) {
@@ -88,7 +99,7 @@ client.once(Events.ClientReady, c => {
 
     // Check balance immediately on startup
     checkOpenRouterBalance();
-    
+
     // Check balance every 30 minutes (30 * 60 * 1000 ms)
     setInterval(checkOpenRouterBalance, 30 * 60 * 1000);
 });
