@@ -1,5 +1,6 @@
 require('dotenv').config();
 const fs = require('fs');
+const https = require('https');
 const { Client, GatewayIntentBits, Partials, Events } = require('discord.js');
 const { OpenAI } = require('openai');
 
@@ -40,9 +41,56 @@ const client = new Client({
     partials: [Partials.Channel, Partials.Message] // Needed for DMs
 });
 
+// Function to check OpenRouter API key usage/balance
+function checkOpenRouterBalance() {
+    const options = {
+        hostname: 'openrouter.ai',
+        path: '/api/v1/auth/key',
+        method: 'GET',
+        headers: {
+            'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`
+        }
+    };
+
+    const req = https.request(options, (res) => {
+        let data = '';
+        res.on('data', (chunk) => data += chunk);
+        res.on('end', () => {
+            if (res.statusCode === 200) {
+                try {
+                    const parsed = JSON.parse(data);
+                    if (parsed.data) {
+                        const limit = parsed.data.limit;
+                        const usage = parsed.data.usage;
+                        
+                        let limitStr = limit !== null ? `$${parseFloat(limit).toFixed(4)}` : 'Unknown Limit';
+                        let usageStr = usage !== null ? `$${parseFloat(usage).toFixed(4)}` : 'Unknown Usage';
+                        
+                        console.log(`[Info] OpenRouter Key Usage - Used: ${usageStr} / Limit: ${limitStr}`);
+                    }
+                } catch (e) {
+                    // silently fail or log a minor warning if parsing fails unexpectedly
+                }
+            }
+        });
+    });
+
+    req.on('error', (error) => {
+        console.error('[Error] Exception checking OpenRouter balance:', error.message);
+    });
+
+    req.end();
+}
+
 client.once(Events.ClientReady, c => {
     console.log(`[Success] Ready! Logged in as ${c.user.tag}`);
     console.log(`[Info] Using model: ${config.model}`);
+
+    // Check balance immediately on startup
+    checkOpenRouterBalance();
+    
+    // Check balance every 30 minutes (30 * 60 * 1000 ms)
+    setInterval(checkOpenRouterBalance, 30 * 60 * 1000);
 });
 
 client.on(Events.MessageCreate, async message => {
