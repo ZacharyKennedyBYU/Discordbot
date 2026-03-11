@@ -162,47 +162,19 @@ class BotManager {
 
         // Extract user text
         let userText = message.content.replace(`<@${client.user.id}>`, '').trim();
-
-        // Truncate if over prompt token limit
-        if (config.max_prompt_tokens) {
-            const charLimit = config.max_prompt_tokens * 4;
-            if (userText.length > charLimit) {
-                userText = userText.substring(0, charLimit) + "... [truncated]";
-            }
-        }
-
         if (!userText) userText = "Hello!";
+
+        const channelId = message.channel.id;
+        const userContent = `${message.author.username}: ${userText}`;
+
+        // Save the user's message to the database
+        this._saveMessage(botId, channelId, 'user', userContent);
 
         try {
             await message.channel.sendTyping();
 
-            const messages = [];
-
-            // System + character prompt
-            const systemContent = `${config.system_prompt || ''}\n\n${config.character_prompt || ''}`.trim();
-            if (systemContent) {
-                messages.push({ role: "system", content: systemContent });
-            }
-
-            // Fetch recent messages for context
-            try {
-                const previousMessages = await message.channel.messages.fetch({ limit: 6 });
-                previousMessages.reverse().forEach(msg => {
-                    if (msg.id === message.id) return;
-                    if (msg.author.id === client.user.id) {
-                        messages.push({ role: "assistant", content: msg.content });
-                    } else {
-                        let text = msg.content.replace(`<@${client.user.id}>`, '').trim();
-                        if (text) {
-                            messages.push({ role: "user", content: `${msg.author.username}: ${text}` });
-                        }
-                    }
-                });
-            } catch (err) {
-                console.error("[CordBridge] Could not fetch chat history:", err.message);
-            }
-
-            messages.push({ role: "user", content: `${message.author.username}: ${userText}` });
+            // Build context from DB with compression
+            const messages = await this._buildContext(botId, channelId, config, openai);
 
             // Prefill
             if (config.prefill && config.prefill.trim() !== '') {
@@ -234,6 +206,9 @@ class BotManager {
                 replyContent = config.prefill + replyContent;
             }
 
+            // Save the bot's response to the database
+            this._saveMessage(botId, channelId, 'assistant', replyContent);
+
             // Chunk if over Discord's 2000 char limit
             if (replyContent.length > 2000) {
                 const chunks = replyContent.match(/[\s\S]{1,1999}/g) || [];
@@ -250,6 +225,134 @@ class BotManager {
                 await message.reply('Sorry, I encountered an error while trying to process that request.');
             } catch (_) { /* ignore reply errors */ }
         }
+    }
+
+    /**
+     * Save a message to the database.
+     */
+    _saveMessage(botId, channelId, role, content) {
+        try {
+            const db = getDb();
+            db.prepare('INSERT INTO messages (bot_id, channel_id, role, content) VALUES (?, ?, ?, ?)')
+                .run(botId, channelId, role, content);
+        } catch (err) {
+            console.error('[CordBridge] Failed to save message:', err.message);
+        }
+    }
+
+    /**
+     * Build the message context array from stored history.
+     * Fits as many recent messages as the token budget allows,
+     * and summarizes older overflow messages via an AI call.
+     */
+    async _buildContext(botId, channelId, config, openai) {
+        const db = getDb();
+        const messages = [];
+
+        // 1. System prompt (always first)
+        const systemContent = `${config.system_prompt || ''}\n\n${config.character_prompt || ''}`.trim();
+        if (systemContent) {
+            messages.push({ role: "system", content: systemContent });
+        }
+
+        // 2. Fetch ALL stored messages for this bot+channel, oldest first
+        const allStoredMessages = db.prepare(
+            'SELECT role, content FROM messages WHERE bot_id = ? AND channel_id = ? ORDER BY created_at ASC'
+        ).all(botId, channelId);
+
+        if (allStoredMessages.length === 0) {
+            return messages;
+        }
+
+        // 3. Token budget calculation
+        const totalBudget = (config.max_prompt_tokens || 10000);
+        const systemTokens = this._estimateTokens(systemContent);
+        const prefillTokens = this._estimateTokens(config.prefill || '');
+        const reservedTokens = systemTokens + prefillTokens + 50; // 50 token safety margin
+        let availableBudget = totalBudget - reservedTokens;
+
+        if (availableBudget < 200) availableBudget = 200; // minimum
+
+        // 4. Walk messages newest→oldest, accumulate until budget is spent
+        const recentMessages = [];
+        let recentTokens = 0;
+        let cutoffIndex = allStoredMessages.length; // everything is "recent" by default
+
+        for (let i = allStoredMessages.length - 1; i >= 0; i--) {
+            const msg = allStoredMessages[i];
+            const msgTokens = this._estimateTokens(msg.content);
+            if (recentTokens + msgTokens > availableBudget) {
+                cutoffIndex = i + 1; // messages 0..i are "old"
+                break;
+            }
+            recentTokens += msgTokens;
+            recentMessages.unshift({ role: msg.role, content: msg.content });
+            cutoffIndex = i;
+        }
+
+        // 5. If there are older messages that didn't fit, summarize them
+        if (cutoffIndex > 0) {
+            const oldMessages = allStoredMessages.slice(0, cutoffIndex);
+            // Reserve ~25% of the budget for the summary
+            const summaryMaxTokens = Math.min(300, Math.floor(availableBudget * 0.25));
+
+            try {
+                const summary = await this._summarizeMessages(oldMessages, openai, config.model, summaryMaxTokens);
+                if (summary) {
+                    messages.push({
+                        role: "system",
+                        content: `[Previous conversation summary]\n${summary}`
+                    });
+                }
+            } catch (err) {
+                console.error('[CordBridge] Summary generation failed, skipping older context:', err.message);
+            }
+        }
+
+        // 6. Append the recent messages (verbatim)
+        messages.push(...recentMessages);
+
+        return messages;
+    }
+
+    /**
+     * Ask the AI to summarize a list of older messages into a compact paragraph.
+     */
+    async _summarizeMessages(oldMessages, openai, model, maxTokens) {
+        const transcript = oldMessages.map(m =>
+            `${m.role === 'user' ? 'User' : 'Bot'}: ${m.content}`
+        ).join('\n');
+
+        // Truncate the transcript itself if absurdly long (>40k chars ≈ 10k tokens)
+        const truncatedTranscript = transcript.length > 40000
+            ? transcript.substring(0, 40000) + '\n... [older messages truncated]'
+            : transcript;
+
+        const response = await openai.chat.completions.create({
+            model: model,
+            messages: [
+                {
+                    role: "system",
+                    content: "You are a summarizer. Condense the following conversation into a brief summary paragraph. Preserve key facts, names, topics discussed, and any important details the users mentioned. Be concise but thorough."
+                },
+                {
+                    role: "user",
+                    content: truncatedTranscript
+                }
+            ],
+            temperature: 0.3,
+            max_tokens: maxTokens,
+        });
+
+        return response.choices[0].message.content.trim();
+    }
+
+    /**
+     * Rough token estimate: ~4 chars per token (same heuristic used elsewhere).
+     */
+    _estimateTokens(text) {
+        if (!text) return 0;
+        return Math.ceil(text.length / 4);
     }
 
     /**

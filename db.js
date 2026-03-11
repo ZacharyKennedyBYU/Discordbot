@@ -165,6 +165,19 @@ function _initTables() {
             created_at TEXT DEFAULT (datetime('now')),
             FOREIGN KEY (provider_id) REFERENCES providers(id) ON DELETE SET NULL
         );
+
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bot_id INTEGER NOT NULL,
+            channel_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (bot_id) REFERENCES bots(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_messages_lookup
+            ON messages(bot_id, channel_id, created_at);
     `);
 }
 

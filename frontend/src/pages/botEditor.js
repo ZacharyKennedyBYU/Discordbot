@@ -147,7 +147,8 @@ export async function render(container, botId) {
 
         <!-- Actions -->
         <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;">
-          <div>
+          <div style="display: flex; gap: 0.75rem;">
+            ${!isNew ? `<button type="button" class="btn btn-ghost" id="clear-history-btn">🧹 Clear History</button>` : ''}
             ${!isNew ? `<button type="button" class="btn btn-danger" id="delete-btn">🗑 Delete Bot</button>` : ''}
           </div>
           <div style="display: flex; gap: 0.75rem;">
@@ -175,6 +176,20 @@ export async function render(container, botId) {
   // ── Navigation ──
   document.getElementById('back-btn').addEventListener('click', () => { window.location.hash = '#/'; });
   document.getElementById('cancel-btn').addEventListener('click', () => { window.location.hash = '#/'; });
+
+  // ── Clear History ──
+  const clearHistoryBtn = document.getElementById('clear-history-btn');
+  if (clearHistoryBtn) {
+    clearHistoryBtn.addEventListener('click', async () => {
+      if (!confirm(`Clear all conversation history for "${bot.name}"? The bot will lose its memory of past conversations.`)) return;
+      try {
+        const result = await bots.clearHistory(bot.id);
+        toast(`History cleared (${result.messagesRemoved} messages removed)`, 'success');
+      } catch (err) {
+        toast(err.message, 'error');
+      }
+    });
+  }
 
   // ── Delete ──
   const deleteBtn = document.getElementById('delete-btn');

@@ -25,11 +25,12 @@ export const providers = {
 
 // ── Bots ──
 export const bots = {
-  list:   ()           => request('/bots'),
-  get:    (id)         => request(`/bots/${id}`),
-  create: (body)       => request('/bots', { method: 'POST', body: JSON.stringify(body) }),
-  update: (id, body)   => request(`/bots/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
-  delete: (id)         => request(`/bots/${id}`, { method: 'DELETE' }),
-  start:  (id)         => request(`/bots/${id}/start`, { method: 'POST' }),
-  stop:   (id)         => request(`/bots/${id}/stop`, { method: 'POST' }),
+  list:         ()           => request('/bots'),
+  get:          (id)         => request(`/bots/${id}`),
+  create:       (body)       => request('/bots', { method: 'POST', body: JSON.stringify(body) }),
+  update:       (id, body)   => request(`/bots/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+  delete:       (id)         => request(`/bots/${id}`, { method: 'DELETE' }),
+  start:        (id)         => request(`/bots/${id}/start`, { method: 'POST' }),
+  stop:         (id)         => request(`/bots/${id}/stop`, { method: 'POST' }),
+  clearHistory: (id)         => request(`/bots/${id}/history`, { method: 'DELETE' }),
 };

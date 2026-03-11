@@ -223,6 +223,17 @@ app.post('/api/bots/:id/stop', async (req, res) => {
     }
 });
 
+// DELETE clear a bot's conversation history
+app.delete('/api/bots/:id/history', (req, res) => {
+    const db = getDb();
+    const existing = db.prepare('SELECT * FROM bots WHERE id = ?').get(req.params.id);
+    if (!existing) return res.status(404).json({ error: 'Bot not found' });
+
+    const result = db.prepare('DELETE FROM messages WHERE bot_id = ?').run(req.params.id);
+    console.log(`[CordBridge] Cleared history for bot id=${req.params.id} (${result.changes} messages removed)`);
+    res.json({ success: true, messagesRemoved: result.changes });
+});
+
 // SPA fallback — serve index.html for all non-API routes
 app.get('*', (req, res) => {
     res.sendFile(path.join(__dirname, 'frontend', 'dist', 'index.html'));
