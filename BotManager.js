@@ -173,8 +173,8 @@ class BotManager {
         try {
             await message.channel.sendTyping();
 
-            // Build context from DB with compression
-            const messages = await this._buildContext(botId, channelId, config, openai);
+            // Build context from DB with compression (pass userText for cross-bot awareness)
+            const messages = await this._buildContext(botId, channelId, config, openai, userText);
 
             // Prefill
             if (config.prefill && config.prefill.trim() !== '') {
@@ -245,7 +245,7 @@ class BotManager {
      * Fits as many recent messages as the token budget allows,
      * and summarizes older overflow messages via an AI call.
      */
-    async _buildContext(botId, channelId, config, openai) {
+    async _buildContext(botId, channelId, config, openai, userText = '') {
         const db = getDb();
         const messages = [];
 
@@ -253,6 +253,13 @@ class BotManager {
         const systemContent = `${config.system_prompt || ''}\n\n${config.character_prompt || ''}`.trim();
         if (systemContent) {
             messages.push({ role: "system", content: systemContent });
+        }
+
+        // 1b. Cross-bot awareness: if the user mentions another bot by name,
+        //     inject that bot's character prompt so this bot knows about them
+        const crossBotInfo = this._getReferencedBotInfo(botId, userText);
+        if (crossBotInfo) {
+            messages.push({ role: "system", content: crossBotInfo });
         }
 
         // 2. Fetch ALL stored messages for this bot+channel, oldest first
@@ -345,6 +352,44 @@ class BotManager {
         });
 
         return response.choices[0].message.content.trim();
+    }
+
+    /**
+     * Check if the user's message mentions any other bots by name.
+     * If so, return a system message with those bots' character prompts.
+     * Handles case-insensitive matching and @ prefixes.
+     */
+    _getReferencedBotInfo(currentBotId, userText) {
+        if (!userText) return null;
+
+        const db = getDb();
+        const allBots = db.prepare('SELECT id, name, character_prompt FROM bots WHERE id != ?').all(currentBotId);
+
+        if (allBots.length === 0) return null;
+
+        // Strip Discord mention tags like <@123456> and normalize
+        const cleanedText = userText.replace(/<@!?\d+>/g, '').toLowerCase();
+
+        const matchedBots = [];
+        for (const bot of allBots) {
+            if (!bot.name || !bot.character_prompt) continue;
+
+            // Match the bot name case-insensitively, also check with @ prefix stripped
+            const botNameLower = bot.name.toLowerCase();
+            // Check for: "botname", "@botname", or the name appearing as a word in the text
+            const namePattern = new RegExp(`(?:^|[\\s@])${botNameLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:[\\s,!?.;:]|$)`, 'i');
+            if (namePattern.test(cleanedText) || cleanedText.includes(botNameLower)) {
+                matchedBots.push(bot);
+            }
+        }
+
+        if (matchedBots.length === 0) return null;
+
+        const infoParts = matchedBots.map(bot =>
+            `[About "${bot.name}"]: ${bot.character_prompt}`
+        );
+
+        return `[The user is asking about other bot(s). Here is info about them for reference:]\n${infoParts.join('\n')}`;
     }
 
     /**
