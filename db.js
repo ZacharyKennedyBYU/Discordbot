@@ -1,21 +1,142 @@
-const Database = require('better-sqlite3');
+const initSqlJs = require('sql.js');
+const fs = require('fs');
 const path = require('path');
 
 const DB_PATH = path.join(__dirname, 'database.sqlite');
 
-let db;
+let db = null;
+let SQL = null;
 
+/**
+ * Thin wrapper around sql.js that mimics the better-sqlite3 API
+ * so that server.js and BotManager.js don't need any changes.
+ */
+class Statement {
+    constructor(database, sql) {
+        this._db = database;
+        this._sql = sql;
+    }
+
+    /** Run a query that returns rows (SELECT). Returns all matching rows. */
+    all(...params) {
+        try {
+            const stmt = this._db.prepare(this._sql);
+            if (params.length) stmt.bind(params);
+            const rows = [];
+            while (stmt.step()) {
+                rows.push(stmt.getAsObject());
+            }
+            stmt.free();
+            return rows;
+        } catch (err) {
+            console.error('[DB] Error in .all():', err.message, '| SQL:', this._sql);
+            throw err;
+        }
+    }
+
+    /** Run a query that returns a single row. Returns the row or undefined. */
+    get(...params) {
+        try {
+            const stmt = this._db.prepare(this._sql);
+            if (params.length) stmt.bind(params);
+            let row = undefined;
+            if (stmt.step()) {
+                row = stmt.getAsObject();
+            }
+            stmt.free();
+            return row;
+        } catch (err) {
+            console.error('[DB] Error in .get():', err.message, '| SQL:', this._sql);
+            throw err;
+        }
+    }
+
+    /** Run a query that modifies data (INSERT/UPDATE/DELETE). Returns { changes, lastInsertRowid }. */
+    run(...params) {
+        try {
+            const stmt = this._db.prepare(this._sql);
+            if (params.length) stmt.bind(params);
+            stmt.step();
+            stmt.free();
+            // Persist to disk after every write
+            const changes = this._db.getRowsModified();
+            const lastId = this._db.exec("SELECT last_insert_rowid() as id");
+            const lastInsertRowid = lastId.length > 0 ? lastId[0].values[0][0] : 0;
+            _save();
+            return { changes, lastInsertRowid };
+        } catch (err) {
+            console.error('[DB] Error in .run():', err.message, '| SQL:', this._sql);
+            throw err;
+        }
+    }
+}
+
+class DatabaseWrapper {
+    constructor(sqlDb) {
+        this._db = sqlDb;
+    }
+
+    prepare(sql) {
+        return new Statement(this._db, sql);
+    }
+
+    exec(sql) {
+        this._db.run(sql);
+        _save();
+    }
+
+    pragma(pragmaStr) {
+        try {
+            this._db.run(`PRAGMA ${pragmaStr}`);
+        } catch (_) {
+            // Some pragmas (like WAL) aren't supported in sql.js, silently skip
+        }
+    }
+}
+
+/** Save the in-memory database to disk */
+function _save() {
+    if (!db) return;
+    try {
+        const data = db._db.export();
+        const buffer = Buffer.from(data);
+        fs.writeFileSync(DB_PATH, buffer);
+    } catch (err) {
+        console.error('[DB] Error saving database:', err.message);
+    }
+}
+
+/** Initialize sql.js and load/create the database */
+async function initDb() {
+    if (db) return db;
+
+    SQL = await initSqlJs();
+
+    // Load existing database from disk, or create a new one
+    if (fs.existsSync(DB_PATH)) {
+        const fileBuffer = fs.readFileSync(DB_PATH);
+        db = new DatabaseWrapper(new SQL.Database(fileBuffer));
+        console.log('[DB] Loaded existing database from disk.');
+    } else {
+        db = new DatabaseWrapper(new SQL.Database());
+        console.log('[DB] Created new database.');
+    }
+
+    db.pragma('foreign_keys = ON');
+    _initTables();
+
+    return db;
+}
+
+/** Get the database instance (must call initDb() first at startup) */
 function getDb() {
     if (!db) {
-        db = new Database(DB_PATH);
-        db.pragma('journal_mode = WAL');
-        db.pragma('foreign_keys = ON');
-        initTables();
+        throw new Error('Database not initialized. Call initDb() first.');
     }
     return db;
 }
 
-function initTables() {
+function _initTables() {
     db.exec(`
         CREATE TABLE IF NOT EXISTS providers (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -47,4 +168,4 @@ function initTables() {
     `);
 }
 
-module.exports = { getDb };
+module.exports = { initDb, getDb };

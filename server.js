@@ -3,7 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const path = require('path');
-const { getDb } = require('./db');
+const { initDb, getDb } = require('./db');
 const BotManager = require('./BotManager');
 
 const app = express();
@@ -231,15 +231,20 @@ app.get('*', (req, res) => {
 // ─────────────────────────────────────────────
 //  Start
 // ─────────────────────────────────────────────
-app.listen(PORT, '0.0.0.0', async () => {
-    console.log(`\n  ╔═══════════════════════════════════════╗`);
-    console.log(`  ║        CordBridge is running!          ║`);
-    console.log(`  ║   Dashboard: http://localhost:${PORT}      ║`);
-    console.log(`  ╚═══════════════════════════════════════╝\n`);
+// ── Async startup (sql.js needs async init) ──
+(async () => {
+    await initDb();
 
-    // Auto-start bots
-    await botManager.autoStartAll();
-});
+    app.listen(PORT, '0.0.0.0', async () => {
+        console.log(`\n  ╔═══════════════════════════════════════╗`);
+        console.log(`  ║        CordBridge is running!          ║`);
+        console.log(`  ║   Dashboard: http://localhost:${PORT}      ║`);
+        console.log(`  ╚═══════════════════════════════════════╝\n`);
+
+        // Auto-start bots
+        await botManager.autoStartAll();
+    });
+})();
 
 // Graceful shutdown
 process.on('SIGINT', async () => {
