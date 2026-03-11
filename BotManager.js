@@ -164,17 +164,27 @@ class BotManager {
         let userText = message.content.replace(`<@${client.user.id}>`, '').trim();
         if (!userText) userText = "Hello!";
 
-        const channelId = message.channel.id;
-        const userContent = `${message.author.username}: ${userText}`;
+        // Resolve Discord <@id> mentions back into actual usernames
+        // so cross-bot name matching works when users @ other bots
+        let resolvedText = userText;
+        if (message.mentions.users.size > 0) {
+            message.mentions.users.forEach(user => {
+                // Replace both <@id> and <@!id> (nickname mention) formats
+                resolvedText = resolvedText.replace(new RegExp(`<@!?${user.id}>`, 'g'), user.username);
+            });
+        }
 
-        // Save the user's message to the database
+        const channelId = message.channel.id;
+        const userContent = `${message.author.username}: ${resolvedText}`;
+
+        // Save the user's message to the database (with resolved names)
         this._saveMessage(botId, channelId, 'user', userContent);
 
         try {
             await message.channel.sendTyping();
 
-            // Build context from DB with compression (pass userText for cross-bot awareness)
-            const messages = await this._buildContext(botId, channelId, config, openai, userText);
+            // Build context from DB with compression (pass resolvedText for cross-bot awareness)
+            const messages = await this._buildContext(botId, channelId, config, openai, resolvedText);
 
             // Prefill
             if (config.prefill && config.prefill.trim() !== '') {
