@@ -45,10 +45,17 @@ export async function render(container, botId) {
               <input class="form-input" id="bot-token" type="password" placeholder="${isNew ? 'Paste your bot token' : '••••••••  (leave blank to keep current)'}" />
             </div>
           </div>
+          <div class="form-group" style="margin-top: 1rem;">
+            <label class="form-label" for="bot-type">Bot Type</label>
+            <select class="form-select" id="bot-type">
+              <option value="real" ${bot?.bot_type !== 'false' ? 'selected' : ''}>Real AI Bot</option>
+              <option value="false" ${bot?.bot_type === 'false' ? 'selected' : ''}>False Bot (Random Phrases)</option>
+            </select>
+          </div>
         </div>
 
         <!-- AI Provider -->
-        <div class="card" style="margin-bottom: 1.5rem;">
+        <div class="card" id="ai-config-card" style="margin-bottom: 1.5rem;">
           <h3 style="margin-bottom: 1rem;">AI Configuration</h3>
           <div class="form-row">
             <div class="form-group">
@@ -84,7 +91,7 @@ export async function render(container, botId) {
         </div>
 
         <!-- Prompts -->
-        <div class="card" style="margin-bottom: 1.5rem;">
+        <div class="card" id="prompts-card" style="margin-bottom: 1.5rem;">
           <h3 style="margin-bottom: 1rem;">Prompts</h3>
           <div class="form-group">
             <label class="form-label" for="bot-system">System Prompt</label>
@@ -109,7 +116,7 @@ export async function render(container, botId) {
         </div>
 
         <!-- Parameters -->
-        <div class="card" style="margin-bottom: 1.5rem;">
+        <div class="card" id="params-card" style="margin-bottom: 1.5rem;">
           <h3 style="margin-bottom: 1rem;">Model Parameters</h3>
           <div class="form-row">
             <div class="form-group slider-group">
@@ -155,6 +162,18 @@ export async function render(container, botId) {
           </div>
         </div>
 
+        <!-- False Bot Phrases -->
+        <div class="card" id="false-phrases-card" style="margin-bottom: 1.5rem; display: none;">
+          <h3 style="margin-bottom: 1rem;">False Bot Phrases</h3>
+          <p style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 1rem;">These phrases will be randomly selected when the bot is mentioned or replied to.</p>
+          <div style="display: flex; gap: 0.5rem; margin-bottom: 1rem;">
+            <input class="form-input" id="new-phrase-input" type="text" placeholder="Add a new phrase..." style="flex: 1;" autocomplete="off" />
+            <button type="button" class="btn btn-primary" id="add-phrase-btn">Add</button>
+          </div>
+          <ul id="phrases-list" style="list-style: none; padding: 0; margin: 0; border: 1px solid var(--border); border-radius: var(--radius); max-height: 250px; overflow-y: auto;">
+          </ul>
+        </div>
+
         <!-- Auto-start -->
         <div class="card" style="margin-bottom: 1.5rem;">
           <div style="display: flex; align-items: center; justify-content: space-between;">
@@ -183,6 +202,80 @@ export async function render(container, botId) {
       </form>
     </div>
   `;
+
+  // ── False Bot Logic ──
+  const botTypeSelect = document.getElementById('bot-type');
+  const aiConfigCard = document.getElementById('ai-config-card');
+  const promptsCard = document.getElementById('prompts-card');
+  const paramsCard = document.getElementById('params-card');
+  const falsePhrasesCard = document.getElementById('false-phrases-card');
+  
+  let falsePhrases = [];
+  try {
+    if (bot && bot.false_phrases) {
+      falsePhrases = JSON.parse(bot.false_phrases || '[]');
+    }
+  } catch(e) {}
+
+  function updateTypeVisibility() {
+    const isFalse = botTypeSelect.value === 'false';
+    if (aiConfigCard) aiConfigCard.style.display = isFalse ? 'none' : 'block';
+    if (promptsCard) promptsCard.style.display = isFalse ? 'none' : 'block';
+    if (paramsCard) paramsCard.style.display = isFalse ? 'none' : 'block';
+    if (falsePhrasesCard) falsePhrasesCard.style.display = isFalse ? 'block' : 'none';
+  }
+  
+  botTypeSelect.addEventListener('change', updateTypeVisibility);
+  updateTypeVisibility();
+
+  // Render phrases list
+  const phrasesListEl = document.getElementById('phrases-list');
+  const newPhraseInput = document.getElementById('new-phrase-input');
+  const addPhraseBtn = document.getElementById('add-phrase-btn');
+
+  function renderPhrases() {
+    phrasesListEl.innerHTML = '';
+    if (falsePhrases.length === 0) {
+      phrasesListEl.innerHTML = '<li style="padding: 0.75rem; text-align: center; color: var(--text-secondary);">No phrases added yet.</li>';
+      return;
+    }
+    falsePhrases.forEach((phrase, index) => {
+      const li = document.createElement('li');
+      li.style.cssText = 'padding: 0.75rem; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem;';
+      const textSpan = document.createElement('span');
+      textSpan.textContent = phrase;
+      textSpan.style.wordBreak = 'break-word';
+      const delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.className = 'btn btn-ghost';
+      delBtn.style.padding = '0.25rem 0.5rem';
+      delBtn.style.color = 'var(--danger)';
+      delBtn.textContent = '✖';
+      delBtn.onclick = () => {
+        falsePhrases.splice(index, 1);
+        renderPhrases();
+      };
+      li.appendChild(textSpan);
+      li.appendChild(delBtn);
+      phrasesListEl.appendChild(li);
+    });
+  }
+  renderPhrases();
+
+  addPhraseBtn.addEventListener('click', () => {
+    const val = newPhraseInput.value.trim();
+    if (val) {
+      falsePhrases.push(val);
+      newPhraseInput.value = '';
+      renderPhrases();
+    }
+  });
+  newPhraseInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      addPhraseBtn.click();
+    }
+  });
 
   // ── Dynamic Model Lists ──
   const providerSelect = document.getElementById('bot-provider');
@@ -324,6 +417,8 @@ export async function render(container, botId) {
       vision_model: document.getElementById('bot-vision-model').value.trim(),
       provider_id: parseInt(document.getElementById('bot-provider').value) || null,
       vision_provider_id: parseInt(document.getElementById('bot-vision-provider').value) || null,
+      bot_type: document.getElementById('bot-type').value,
+      false_phrases: JSON.stringify(falsePhrases),
       system_prompt: document.getElementById('bot-system').value,
       character_prompt: document.getElementById('bot-character').value,
       first_message: document.getElementById('bot-first-msg').value,

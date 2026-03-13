@@ -45,43 +45,48 @@ class BotManager {
             return { success: false, error: 'Bot not found in database.' };
         }
 
-        // Fetch provider info
-        let provider = null;
-        if (botRow.provider_id) {
-            provider = db.prepare('SELECT * FROM providers WHERE id = ?').get(botRow.provider_id);
-        }
-
-        if (!provider) {
-            return { success: false, error: 'No API provider assigned to this bot. Please assign a provider first.' };
-        }
-
         if (!botRow.discord_token) {
             return { success: false, error: 'No Discord token configured for this bot.' };
         }
 
-        // Create OpenAI client pointing to the provider's base URL
-        const openai = new OpenAI({
-            baseURL: provider.base_url,
-            apiKey: provider.api_key,
-            defaultHeaders: {
-                "HTTP-Referer": "https://github.com/cordbridge",
-                "X-Title": "CordBridge",
-            }
-        });
+        let openai = null;
+        let visionOpenai = null;
 
-        // Create Vision OpenAI client if a separate provider is specified
-        let visionOpenai = openai; // Default to same as chat provider
-        if (botRow.vision_provider_id && botRow.vision_provider_id !== botRow.provider_id) {
-            const visionProvider = db.prepare('SELECT * FROM providers WHERE id = ?').get(botRow.vision_provider_id);
-            if (visionProvider) {
-                visionOpenai = new OpenAI({
-                    baseURL: visionProvider.base_url,
-                    apiKey: visionProvider.api_key,
-                    defaultHeaders: {
-                        "HTTP-Referer": "https://github.com/cordbridge",
-                        "X-Title": "CordBridge",
-                    }
-                });
+        if (botRow.bot_type !== 'false') {
+            // Fetch provider info
+            let provider = null;
+            if (botRow.provider_id) {
+                provider = db.prepare('SELECT * FROM providers WHERE id = ?').get(botRow.provider_id);
+            }
+
+            if (!provider) {
+                return { success: false, error: 'No API provider assigned to this bot. Please assign a provider first.' };
+            }
+
+            // Create OpenAI client pointing to the provider's base URL
+            openai = new OpenAI({
+                baseURL: provider.base_url,
+                apiKey: provider.api_key,
+                defaultHeaders: {
+                    "HTTP-Referer": "https://github.com/cordbridge",
+                    "X-Title": "CordBridge",
+                }
+            });
+
+            // Create Vision OpenAI client if a separate provider is specified
+            visionOpenai = openai; // Default to same as chat provider
+            if (botRow.vision_provider_id && botRow.vision_provider_id !== botRow.provider_id) {
+                const visionProvider = db.prepare('SELECT * FROM providers WHERE id = ?').get(botRow.vision_provider_id);
+                if (visionProvider) {
+                    visionOpenai = new OpenAI({
+                        baseURL: visionProvider.base_url,
+                        apiKey: visionProvider.api_key,
+                        defaultHeaders: {
+                            "HTTP-Referer": "https://github.com/cordbridge",
+                            "X-Title": "CordBridge",
+                        }
+                    });
+                }
             }
         }
 
@@ -349,6 +354,24 @@ class BotManager {
 
         // Save the user's message to the database (with resolved names & image context)
         this._saveMessage(botId, channelId, guildId, 'user', userContent);
+
+        // FALSE BOT LOGIC
+        if (config.bot_type === 'false') {
+            let phrases = [];
+            try { phrases = JSON.parse(config.false_phrases || '[]'); } catch (e) {}
+            if (phrases.length > 0) {
+                try {
+                    await message.channel.sendTyping();
+                    await new Promise(resolve => setTimeout(resolve, 800)); // slight typing delay for realism
+                    const randomPhrase = phrases[Math.floor(Math.random() * phrases.length)];
+                    await message.reply(randomPhrase);
+                    this._saveMessage(botId, channelId, guildId, 'assistant', randomPhrase);
+                } catch (err) {
+                    console.error(`[CordBridge] False Bot API Error:`, err.message);
+                }
+            }
+            return;
+        }
 
         try {
             await message.channel.sendTyping();

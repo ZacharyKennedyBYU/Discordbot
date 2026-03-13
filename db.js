@@ -150,6 +150,8 @@ function _initTables() {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             discord_token TEXT NOT NULL,
+            bot_type TEXT DEFAULT 'real',
+            false_phrases TEXT DEFAULT '[]',
             provider_id INTEGER,
             vision_provider_id INTEGER,
             model TEXT NOT NULL DEFAULT 'deepseek/deepseek-v3.2',
@@ -208,6 +210,16 @@ function _initTables() {
     }
     try {
         db.exec('ALTER TABLE bots ADD COLUMN vision_provider_id INTEGER');
+    } catch (_) {
+        // Column already exists — ignore
+    }
+    try {
+        db.exec('ALTER TABLE bots ADD COLUMN bot_type TEXT DEFAULT "real"');
+    } catch (_) {
+        // Column already exists — ignore
+    }
+    try {
+        db.exec('ALTER TABLE bots ADD COLUMN false_phrases TEXT DEFAULT "[]"');
     } catch (_) {
         // Column already exists — ignore
     }
