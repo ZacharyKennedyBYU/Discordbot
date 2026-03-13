@@ -2,4 +2,3 @@ node_modules/
 .env
 database.sqlite
 frontend/node_modules/
-frontend/dist/
