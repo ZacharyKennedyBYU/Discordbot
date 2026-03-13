@@ -80,6 +80,32 @@ app.delete('/api/providers/:id', (req, res) => {
     res.json({ success: true });
 });
 
+// GET available models from a provider's API
+app.get('/api/providers/:id/models', async (req, res) => {
+    const db = getDb();
+    const provider = db.prepare('SELECT * FROM providers WHERE id = ?').get(req.params.id);
+    if (!provider) return res.status(404).json({ error: 'Provider not found' });
+
+    try {
+        const response = await fetch(`${provider.base_url}/models`, {
+            headers: {
+                'Authorization': `Bearer ${provider.api_key}`,
+                'Content-Type': 'application/json'
+            }
+        });
+        
+        if (!response.ok) {
+            return res.status(response.status).json({ error: `Provider API responded with ${response.status}` });
+        }
+        
+        const data = await response.json();
+        // Return exactly what the provider returns (usually { data: [ { id: "gpt-4" }, ... ] })
+        res.json(data);
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch models from provider: ' + err.message });
+    }
+});
+
 // ─────────────────────────────────────────────
 //  Bot API Routes
 // ─────────────────────────────────────────────

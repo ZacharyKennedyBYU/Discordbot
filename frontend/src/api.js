@@ -16,11 +16,12 @@ async function request(path, options = {}) {
 
 // ── Providers ──
 export const providers = {
-  list:   ()           => request('/providers'),
-  get:    (id)         => request(`/providers/${id}`),
-  create: (body)       => request('/providers', { method: 'POST', body: JSON.stringify(body) }),
-  update: (id, body)   => request(`/providers/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
-  delete: (id)         => request(`/providers/${id}`, { method: 'DELETE' }),
+  list:      ()           => request('/providers'),
+  get:       (id)         => request(`/providers/${id}`),
+  create:    (body)       => request('/providers', { method: 'POST', body: JSON.stringify(body) }),
+  update:    (id, body)   => request(`/providers/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+  delete:    (id)         => request(`/providers/${id}`, { method: 'DELETE' }),
+  getModels: (id)         => request(`/providers/${id}/models`),
 };
 
 // ── Bots ──

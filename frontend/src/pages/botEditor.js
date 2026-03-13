@@ -62,7 +62,8 @@ export async function render(container, botId) {
             </div>
             <div class="form-group">
               <label class="form-label" for="bot-model">Model ID</label>
-              <input class="form-input" id="bot-model" type="text" placeholder="deepseek/deepseek-v3.2" value="${escapeAttr(bot?.model || 'deepseek/deepseek-v3.2')}" />
+              <input class="form-input" id="bot-model" type="text" list="bot-model-list" placeholder="deepseek/deepseek-v3.2" value="${escapeAttr(bot?.model || 'deepseek/deepseek-v3.2')}" autocomplete="off" />
+              <datalist id="bot-model-list"></datalist>
             </div>
             <div class="form-group">
               <label class="form-label" for="bot-vision-provider">Vision Provider (Optional)</label>
@@ -75,7 +76,8 @@ export async function render(container, botId) {
             </div>
             <div class="form-group">
               <label class="form-label" for="bot-vision-model">Vision Model ID (Optional)</label>
-              <input class="form-input" id="bot-vision-model" type="text" placeholder="openai/gpt-4o-mini" value="${escapeAttr(bot?.vision_model || '')}" />
+              <input class="form-input" id="bot-vision-model" type="text" list="bot-vision-model-list" placeholder="openai/gpt-4o-mini" value="${escapeAttr(bot?.vision_model || '')}" autocomplete="off" />
+              <datalist id="bot-vision-model-list"></datalist>
               <p style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.25rem;">Used to read images attached to messages or replied-to messages.</p>
             </div>
           </div>
@@ -181,6 +183,52 @@ export async function render(container, botId) {
       </form>
     </div>
   `;
+
+  // ── Dynamic Model Lists ──
+  const providerSelect = document.getElementById('bot-provider');
+  const visionProviderSelect = document.getElementById('bot-vision-provider');
+
+  async function loadModels(providerId, datalistId) {
+    const datalist = document.getElementById(datalistId);
+    datalist.innerHTML = '';
+    if (!providerId) return;
+    try {
+      const resp = await providers.getModels(providerId);
+      // Provider APIs usually return { data: [ { id, name }, ... ] }
+      if (resp && resp.data && Array.isArray(resp.data)) {
+        resp.data.forEach(model => {
+          const opt = document.createElement('option');
+          opt.value = model.id;
+          if (model.name && model.name !== model.id) {
+             opt.textContent = model.name;
+          }
+          datalist.appendChild(opt);
+        });
+      }
+    } catch (err) {
+      console.error('Failed to load models:', err);
+    }
+  }
+
+  providerSelect.addEventListener('change', () => {
+    loadModels(providerSelect.value, 'bot-model-list');
+    if (!visionProviderSelect.value) {
+      // If vision provider is "Same as Chat Provider", update its list too
+      loadModels(providerSelect.value, 'bot-vision-model-list');
+    }
+  });
+
+  visionProviderSelect.addEventListener('change', () => {
+    loadModels(visionProviderSelect.value || providerSelect.value, 'bot-vision-model-list');
+  });
+
+  // Initial load
+  if (providerSelect.value) {
+    loadModels(providerSelect.value, 'bot-model-list');
+  }
+  if (visionProviderSelect.value || providerSelect.value) {
+    loadModels(visionProviderSelect.value || providerSelect.value, 'bot-vision-model-list');
+  }
 
   // ── Slider live values ──
   const sliders = [
