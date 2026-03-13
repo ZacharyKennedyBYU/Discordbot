@@ -123,20 +123,21 @@ app.get('/api/bots/:id', (req, res) => {
 
 // POST create a bot
 app.post('/api/bots', (req, res) => {
-    const { name, discord_token, provider_id, model, vision_model, system_prompt, character_prompt, first_message, example_messages, prefill,
+    const { name, discord_token, provider_id, vision_provider_id, model, vision_model, system_prompt, character_prompt, first_message, example_messages, prefill,
         temperature, top_p, max_tokens, max_prompt_tokens, presence_penalty, frequency_penalty, auto_start } = req.body;
 
     if (!name || !discord_token) return res.status(400).json({ error: 'name and discord_token are required.' });
 
     const db = getDb();
     const result = db.prepare(`
-        INSERT INTO bots (name, discord_token, provider_id, model, vision_model, system_prompt, character_prompt, first_message, example_messages, prefill,
+        INSERT INTO bots (name, discord_token, provider_id, vision_provider_id, model, vision_model, system_prompt, character_prompt, first_message, example_messages, prefill,
             temperature, top_p, max_tokens, max_prompt_tokens, presence_penalty, frequency_penalty, auto_start)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
         name,
         discord_token,
         provider_id || null,
+        vision_provider_id || null,
         model || 'deepseek/deepseek-v3.2',
         vision_model || '',
         system_prompt || '',
@@ -161,7 +162,7 @@ app.put('/api/bots/:id', (req, res) => {
     const existing = db.prepare('SELECT * FROM bots WHERE id = ?').get(req.params.id);
     if (!existing) return res.status(404).json({ error: 'Bot not found' });
 
-    const fields = ['name', 'discord_token', 'provider_id', 'model', 'vision_model', 'system_prompt', 'character_prompt',
+    const fields = ['name', 'discord_token', 'provider_id', 'vision_provider_id', 'model', 'vision_model', 'system_prompt', 'character_prompt',
         'first_message', 'example_messages', 'prefill', 'temperature', 'top_p', 'max_tokens', 'max_prompt_tokens', 'presence_penalty', 'frequency_penalty', 'auto_start'];
 
     const updates = {};
@@ -174,11 +175,11 @@ app.put('/api/bots/:id', (req, res) => {
     }
 
     db.prepare(`
-        UPDATE bots SET name=?, discord_token=?, provider_id=?, model=?, vision_model=?, system_prompt=?, character_prompt=?,
+        UPDATE bots SET name=?, discord_token=?, provider_id=?, vision_provider_id=?, model=?, vision_model=?, system_prompt=?, character_prompt=?,
             first_message=?, example_messages=?, prefill=?, temperature=?, top_p=?, max_tokens=?, max_prompt_tokens=?, presence_penalty=?, frequency_penalty=?, auto_start=?
         WHERE id = ?
     `).run(
-        updates.name, updates.discord_token, updates.provider_id, updates.model, updates.vision_model,
+        updates.name, updates.discord_token, updates.provider_id, updates.vision_provider_id, updates.model, updates.vision_model,
         updates.system_prompt, updates.character_prompt, updates.first_message, updates.example_messages, updates.prefill,
         updates.temperature, updates.top_p, updates.max_tokens, updates.max_prompt_tokens,
         updates.presence_penalty, updates.frequency_penalty, updates.auto_start,

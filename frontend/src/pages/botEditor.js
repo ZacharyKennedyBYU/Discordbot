@@ -65,6 +65,15 @@ export async function render(container, botId) {
               <input class="form-input" id="bot-model" type="text" placeholder="deepseek/deepseek-v3.2" value="${escapeAttr(bot?.model || 'deepseek/deepseek-v3.2')}" />
             </div>
             <div class="form-group">
+              <label class="form-label" for="bot-vision-provider">Vision Provider (Optional)</label>
+              <select class="form-select" id="bot-vision-provider">
+                <option value="">— Same as Chat Provider —</option>
+                ${providerList.map(p => `
+                  <option value="${p.id}" ${bot?.vision_provider_id === p.id ? 'selected' : ''}>${escapeHtml(p.name)}</option>
+                `).join('')}
+              </select>
+            </div>
+            <div class="form-group">
               <label class="form-label" for="bot-vision-model">Vision Model ID (Optional)</label>
               <input class="form-input" id="bot-vision-model" type="text" placeholder="openai/gpt-4o-mini" value="${escapeAttr(bot?.vision_model || '')}" />
               <p style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.25rem;">Used to read images attached to messages or replied-to messages.</p>
@@ -266,6 +275,7 @@ export async function render(container, botId) {
       model: document.getElementById('bot-model').value.trim(),
       vision_model: document.getElementById('bot-vision-model').value.trim(),
       provider_id: parseInt(document.getElementById('bot-provider').value) || null,
+      vision_provider_id: parseInt(document.getElementById('bot-vision-provider').value) || null,
       system_prompt: document.getElementById('bot-system').value,
       character_prompt: document.getElementById('bot-character').value,
       first_message: document.getElementById('bot-first-msg').value,

@@ -69,6 +69,22 @@ class BotManager {
             }
         });
 
+        // Create Vision OpenAI client if a separate provider is specified
+        let visionOpenai = openai; // Default to same as chat provider
+        if (botRow.vision_provider_id && botRow.vision_provider_id !== botRow.provider_id) {
+            const visionProvider = db.prepare('SELECT * FROM providers WHERE id = ?').get(botRow.vision_provider_id);
+            if (visionProvider) {
+                visionOpenai = new OpenAI({
+                    baseURL: visionProvider.base_url,
+                    apiKey: visionProvider.api_key,
+                    defaultHeaders: {
+                        "HTTP-Referer": "https://github.com/cordbridge",
+                        "X-Title": "CordBridge",
+                    }
+                });
+            }
+        }
+
         // Create Discord client
         const client = new Client({
             intents: [
@@ -83,7 +99,7 @@ class BotManager {
         return new Promise((resolve) => {
             client.once(Events.ClientReady, c => {
                 console.log(`[CordBridge] Bot "${botRow.name}" online as ${c.user.tag}`);
-                this.activeBots.set(botId, { client, openai, config: botRow, discordTag: c.user.tag });
+                this.activeBots.set(botId, { client, openai, visionOpenai, config: botRow, discordTag: c.user.tag });
                 resolve({ success: true, tag: c.user.tag });
             });
 
@@ -230,7 +246,7 @@ class BotManager {
         const entry = this.activeBots.get(botId);
         if (!entry) return;
 
-        const { client, openai, config } = entry;
+        const { client, openai, visionOpenai, config } = entry;
 
         // Ignore bot messages
         if (message.author.bot) return;
@@ -275,7 +291,7 @@ class BotManager {
             await message.channel.sendTyping(); // Show thinking state during vision processing
             for (let i = 0; i < images.length; i++) {
                 try {
-                    const visionResponse = await openai.chat.completions.create({
+                    const visionResponse = await visionOpenai.chat.completions.create({
                         model: config.vision_model,
                         messages: [
                             {

@@ -151,6 +151,7 @@ function _initTables() {
             name TEXT NOT NULL,
             discord_token TEXT NOT NULL,
             provider_id INTEGER,
+            vision_provider_id INTEGER,
             model TEXT NOT NULL DEFAULT 'deepseek/deepseek-v3.2',
             vision_model TEXT DEFAULT '',
             system_prompt TEXT DEFAULT '',
@@ -202,6 +203,11 @@ function _initTables() {
     }
     try {
         db.exec('ALTER TABLE bots ADD COLUMN vision_model TEXT DEFAULT ""');
+    } catch (_) {
+        // Column already exists — ignore
+    }
+    try {
+        db.exec('ALTER TABLE bots ADD COLUMN vision_provider_id INTEGER');
     } catch (_) {
         // Column already exists — ignore
     }
