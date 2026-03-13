@@ -64,6 +64,11 @@ export async function render(container, botId) {
               <label class="form-label" for="bot-model">Model ID</label>
               <input class="form-input" id="bot-model" type="text" placeholder="deepseek/deepseek-v3.2" value="${escapeAttr(bot?.model || 'deepseek/deepseek-v3.2')}" />
             </div>
+            <div class="form-group">
+              <label class="form-label" for="bot-vision-model">Vision Model ID (Optional)</label>
+              <input class="form-input" id="bot-vision-model" type="text" placeholder="openai/gpt-4o-mini" value="${escapeAttr(bot?.vision_model || '')}" />
+              <p style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.25rem;">Used to read images attached to messages or replied-to messages.</p>
+            </div>
           </div>
         </div>
 
@@ -259,6 +264,7 @@ export async function render(container, botId) {
     const body = {
       name: document.getElementById('bot-name').value.trim(),
       model: document.getElementById('bot-model').value.trim(),
+      vision_model: document.getElementById('bot-vision-model').value.trim(),
       provider_id: parseInt(document.getElementById('bot-provider').value) || null,
       system_prompt: document.getElementById('bot-system').value,
       character_prompt: document.getElementById('bot-character').value,

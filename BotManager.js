@@ -241,24 +241,97 @@ class BotManager {
         if (!isMentioned && !isDM) return;
 
         // Extract user text
+        // Extract user text
         let userText = message.content.replace(`<@${client.user.id}>`, '').trim();
-        if (!userText) userText = "Hello!";
+        if (!userText && message.attachments.size === 0) userText = "Hello!";
+
+        // Fetch replied message if it exists
+        let repliedMessage = null;
+        if (message.reference && message.reference.messageId) {
+            try {
+                repliedMessage = await message.channel.messages.fetch(message.reference.messageId);
+            } catch (err) {
+                console.error(`[CordBridge] Failed to fetch replied message:`, err.message);
+            }
+        }
+
+        // Gather image attachments (up to 3)
+        const imagesToProcess = [];
+        
+        message.attachments.forEach(att => {
+            if (att.contentType && att.contentType.startsWith('image/')) imagesToProcess.push(att.url);
+        });
+        
+        if (repliedMessage) {
+            repliedMessage.attachments.forEach(att => {
+                if (att.contentType && att.contentType.startsWith('image/')) imagesToProcess.push(att.url);
+            });
+        }
+        const images = imagesToProcess.slice(0, 3);
+
+        // Generate Image Descriptions
+        let imageDescriptions = [];
+        if (images.length > 0 && config.vision_model) {
+            await message.channel.sendTyping(); // Show thinking state during vision processing
+            for (let i = 0; i < images.length; i++) {
+                try {
+                    const visionResponse = await openai.chat.completions.create({
+                        model: config.vision_model,
+                        messages: [
+                            {
+                                role: "user",
+                                content: [
+                                    { type: "text", text: "Please provide a detailed, concise description of this image. Focus on the main subjects, actions, environment, and mood so that someone who cannot see it can understand it perfectly." },
+                                    { type: "image_url", image_url: { url: images[i] } }
+                                ]
+                            }
+                        ],
+                        max_tokens: 400
+                    });
+                    const desc = visionResponse.choices[0]?.message?.content?.trim();
+                    if (desc) imageDescriptions.push(`[Attached Image ${i + 1} Description: ${desc}]`);
+                } catch (err) {
+                    console.error('[CordBridge] Vision API Error:', err.message);
+                    imageDescriptions.push(`[Attached Image ${i + 1}: (Failed to read image due to API error)]`);
+                }
+            }
+        } else if (images.length > 0 && !config.vision_model) {
+            imageDescriptions.push(`[User attached ${images.length} image(s) but my optical sensors are disabled. I cannot see them.]`);
+        }
 
         // Resolve Discord <@id> mentions back into actual usernames
-        // so cross-bot name matching works when users @ other bots
         let resolvedText = userText;
         if (message.mentions.users.size > 0) {
             message.mentions.users.forEach(user => {
-                // Replace both <@id> and <@!id> (nickname mention) formats
                 resolvedText = resolvedText.replace(new RegExp(`<@!?${user.id}>`, 'g'), user.username);
             });
         }
 
+        // Prepend contextual information
+        let contextPrefix = "";
+        if (repliedMessage) {
+            let repText = repliedMessage.content;
+            if (repliedMessage.mentions.users.size > 0) {
+                repliedMessage.mentions.users.forEach(u => {
+                    repText = repText.replace(new RegExp(`<@!?${u.id}>`, 'g'), u.username);
+                });
+            }
+            contextPrefix += `[Replying to ${repliedMessage.author.username}'s message: "${repText}"]\n\n`;
+        }
+        
+        if (imageDescriptions.length > 0) {
+            contextPrefix += imageDescriptions.join('\n') + '\n\n';
+        }
+        
+        if (contextPrefix) {
+            resolvedText = contextPrefix + resolvedText;
+        }
+
         const channelId = message.channel.id;
         const guildId = message.guild?.id || 'DM';
-        const userContent = `${message.author.username}: ${resolvedText}`;
+        const userContent = `${message.author.username}: ${resolvedText}`.trim();
 
-        // Save the user's message to the database (with resolved names)
+        // Save the user's message to the database (with resolved names & image context)
         this._saveMessage(botId, channelId, guildId, 'user', userContent);
 
         try {

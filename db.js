@@ -152,6 +152,7 @@ function _initTables() {
             discord_token TEXT NOT NULL,
             provider_id INTEGER,
             model TEXT NOT NULL DEFAULT 'deepseek/deepseek-v3.2',
+            vision_model TEXT DEFAULT '',
             system_prompt TEXT DEFAULT '',
             character_prompt TEXT DEFAULT '',
             first_message TEXT DEFAULT '',
@@ -196,6 +197,11 @@ function _initTables() {
     }
     try {
         db.exec('ALTER TABLE messages ADD COLUMN guild_id TEXT DEFAULT ""');
+    } catch (_) {
+        // Column already exists — ignore
+    }
+    try {
+        db.exec('ALTER TABLE bots ADD COLUMN vision_model TEXT DEFAULT ""');
     } catch (_) {
         // Column already exists — ignore
     }
