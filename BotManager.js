@@ -184,7 +184,7 @@ class BotManager {
             await message.channel.sendTyping();
 
             // Build context from DB with compression (pass resolvedText for cross-bot awareness)
-            const messages = await this._buildContext(botId, channelId, config, openai, resolvedText);
+            const messages = await this._buildContext(botId, channelId, config, openai, resolvedText, message);
 
             // Prefill
             if (config.prefill && config.prefill.trim() !== '') {
@@ -255,7 +255,7 @@ class BotManager {
      * Fits as many recent messages as the token budget allows,
      * and summarizes older overflow messages via an AI call.
      */
-    async _buildContext(botId, channelId, config, openai, userText = '') {
+    async _buildContext(botId, channelId, config, openai, userText = '', discordMessage = null) {
         const db = getDb();
         const messages = [];
 
@@ -272,10 +272,22 @@ class BotManager {
             messages.push({ role: "system", content: crossBotInfo });
         }
 
+        // 1c. Identity anchor: always inject first_message so the bot knows its voice
+        if (config.first_message && config.first_message.trim()) {
+            messages.push({ role: "assistant", content: config.first_message });
+        }
+
         // 2. Fetch ALL stored messages for this bot+channel, oldest first
         const allStoredMessages = db.prepare(
             'SELECT role, content FROM messages WHERE bot_id = ? AND channel_id = ? ORDER BY created_at ASC'
         ).all(botId, channelId);
+
+        // 2b. Ambient channel context: fetch recent Discord messages for awareness
+        //     These are NOT saved — they're ephemeral background context
+        const channelContext = await this._fetchChannelContext(discordMessage, allStoredMessages);
+        if (channelContext) {
+            messages.push({ role: "system", content: channelContext });
+        }
 
         if (allStoredMessages.length === 0) {
             return messages;
@@ -400,6 +412,53 @@ class BotManager {
         );
 
         return `[The user is asking about other bot(s). Here is info about them for reference:]\n${infoParts.join('\n')}`;
+    }
+
+    /**
+     * Fetch recent channel messages from Discord for ambient awareness.
+     * Filters out messages already in saved conversation history.
+     * Returns a formatted system message or null if nothing useful.
+     */
+    async _fetchChannelContext(discordMessage, savedMessages) {
+        if (!discordMessage || discordMessage.channel.isDMBased()) return null;
+
+        try {
+            const fetched = await discordMessage.channel.messages.fetch({ limit: 15 });
+            const channelMsgs = [...fetched.values()].reverse(); // oldest first
+
+            // Build a set of saved message contents for deduplication
+            const savedContentSet = new Set(savedMessages.map(m => m.content));
+
+            const contextLines = [];
+            for (const msg of channelMsgs) {
+                // Skip the triggering message itself (it's already saved)
+                if (msg.id === discordMessage.id) continue;
+
+                let text = msg.content.trim();
+                if (!text) continue;
+
+                // Resolve <@id> mentions to usernames
+                if (msg.mentions.users.size > 0) {
+                    msg.mentions.users.forEach(user => {
+                        text = text.replace(new RegExp(`<@!?${user.id}>`, 'g'), `@${user.username}`);
+                    });
+                }
+
+                const formatted = `${msg.author.username}: ${text}`;
+
+                // Skip if this message is already in saved conversation history
+                if (savedContentSet.has(formatted)) continue;
+
+                contextLines.push(formatted);
+            }
+
+            if (contextLines.length === 0) return null;
+
+            return `[Recent channel activity — these are background messages you were not directly part of, for situational awareness only:]\n${contextLines.join('\n')}`;
+        } catch (err) {
+            console.error('[CordBridge] Could not fetch channel context:', err.message);
+            return null;
+        }
     }
 
     /**

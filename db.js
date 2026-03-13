@@ -154,6 +154,7 @@ function _initTables() {
             model TEXT NOT NULL DEFAULT 'deepseek/deepseek-v3.2',
             system_prompt TEXT DEFAULT '',
             character_prompt TEXT DEFAULT '',
+            first_message TEXT DEFAULT '',
             prefill TEXT DEFAULT '',
             temperature REAL DEFAULT 0.9,
             top_p REAL DEFAULT 0.9,
@@ -179,6 +180,13 @@ function _initTables() {
         CREATE INDEX IF NOT EXISTS idx_messages_lookup
             ON messages(bot_id, channel_id, created_at);
     `);
+
+    // Migration: add first_message column to existing databases
+    try {
+        db.exec('ALTER TABLE bots ADD COLUMN first_message TEXT DEFAULT ""');
+    } catch (_) {
+        // Column already exists — ignore
+    }
 }
 
 module.exports = { initDb, getDb };
