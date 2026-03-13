@@ -2,7 +2,7 @@
 //  CordBridge — Bot Editor Page
 // ═══════════════════════════════════════════════
 
-import { bots, providers } from '../api.js';
+import { bots, providers, upload } from '../api.js';
 import { toast } from '../toast.js';
 
 export function destroy() {}
@@ -166,9 +166,13 @@ export async function render(container, botId) {
         <div class="card" id="false-phrases-card" style="margin-bottom: 1.5rem; display: none;">
           <h3 style="margin-bottom: 1rem;">False Bot Phrases</h3>
           <p style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 1rem;">These phrases will be randomly selected when the bot is mentioned or replied to.</p>
+          <div style="display: flex; gap: 0.5rem; margin-bottom: 0.5rem;">
+            <input class="form-input" id="new-phrase-input" type="text" placeholder="Add a new text phrase..." style="flex: 1;" autocomplete="off" />
+            <button type="button" class="btn btn-primary" id="add-phrase-btn">Add Text</button>
+          </div>
           <div style="display: flex; gap: 0.5rem; margin-bottom: 1rem;">
-            <input class="form-input" id="new-phrase-input" type="text" placeholder="Add a new phrase..." style="flex: 1;" autocomplete="off" />
-            <button type="button" class="btn btn-primary" id="add-phrase-btn">Add</button>
+            <input class="form-input" id="new-audio-input" type="file" accept="audio/*" style="flex: 1;" />
+            <button type="button" class="btn btn-ghost" style="border: 1px solid var(--border);" id="add-audio-btn">Upload MP3</button>
           </div>
           <ul id="phrases-list" style="list-style: none; padding: 0; margin: 0; border: 1px solid var(--border); border-radius: var(--radius); max-height: 250px; overflow-y: auto;">
           </ul>
@@ -232,6 +236,8 @@ export async function render(container, botId) {
   const phrasesListEl = document.getElementById('phrases-list');
   const newPhraseInput = document.getElementById('new-phrase-input');
   const addPhraseBtn = document.getElementById('add-phrase-btn');
+  const newAudioInput = document.getElementById('new-audio-input');
+  const addAudioBtn = document.getElementById('add-audio-btn');
 
   function renderPhrases() {
     phrasesListEl.innerHTML = '';
@@ -243,8 +249,14 @@ export async function render(container, botId) {
       const li = document.createElement('li');
       li.style.cssText = 'padding: 0.75rem; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem;';
       const textSpan = document.createElement('span');
-      textSpan.textContent = phrase;
       textSpan.style.wordBreak = 'break-word';
+
+      if (typeof phrase === 'string') {
+        textSpan.textContent = phrase;
+      } else if (phrase.type === 'audio') {
+        textSpan.innerHTML = `🎵 <strong>Audio:</strong> ${escapeHtml(phrase.originalName || 'response.mp3')}`;
+      }
+
       const delBtn = document.createElement('button');
       delBtn.type = 'button';
       delBtn.className = 'btn btn-ghost';
@@ -274,6 +286,30 @@ export async function render(container, botId) {
     if (e.key === 'Enter') {
       e.preventDefault();
       addPhraseBtn.click();
+    }
+  });
+
+  addAudioBtn.addEventListener('click', async () => {
+    const file = newAudioInput.files[0];
+    if (!file) return toast('Please select a file first', 'error');
+
+    try {
+      addAudioBtn.disabled = true;
+      addAudioBtn.textContent = 'Uploading...';
+      const res = await upload(file);
+      falsePhrases.push({
+        type: 'audio',
+        path: res.path,
+        originalName: res.originalname
+      });
+      newAudioInput.value = '';
+      renderPhrases();
+      toast('Audio uploaded successfully', 'success');
+    } catch (err) {
+      toast(err.message, 'error');
+    } finally {
+      addAudioBtn.disabled = false;
+      addAudioBtn.textContent = 'Upload MP3';
     }
   });
 

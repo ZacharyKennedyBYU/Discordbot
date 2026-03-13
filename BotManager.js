@@ -1,5 +1,7 @@
 const { Client, GatewayIntentBits, Partials, Events } = require('discord.js');
 const { OpenAI } = require('openai');
+const path = require('path');
+const fs = require('fs');
 const { getDb } = require('./db');
 
 class BotManager {
@@ -364,8 +366,27 @@ class BotManager {
                     await message.channel.sendTyping();
                     await new Promise(resolve => setTimeout(resolve, 800)); // slight typing delay for realism
                     const randomPhrase = phrases[Math.floor(Math.random() * phrases.length)];
-                    await message.reply(randomPhrase);
-                    this._saveMessage(botId, channelId, guildId, 'assistant', randomPhrase);
+                    
+                    if (typeof randomPhrase === 'object' && randomPhrase.type === 'audio') {
+                        const filePath = path.join(__dirname, randomPhrase.path);
+                        if (fs.existsSync(filePath)) {
+                            await message.reply({ 
+                                files: [{ 
+                                    attachment: filePath, 
+                                    name: 'response.mp3' 
+                                }] 
+                            });
+                            this._saveMessage(botId, channelId, guildId, 'assistant', `[Sent audio file: ${randomPhrase.originalName || 'response.mp3'}]`);
+                        } else {
+                            await message.reply("[Error: Audio file not found]");
+                            this._saveMessage(botId, channelId, guildId, 'assistant', '[Error: Audio file not found]');
+                        }
+                    } else {
+                        // It's a string, or fallback
+                        const text = typeof randomPhrase === 'string' ? randomPhrase : (randomPhrase.text || '...');
+                        await message.reply(text);
+                        this._saveMessage(botId, channelId, guildId, 'assistant', text);
+                    }
                 } catch (err) {
                     console.error(`[CordBridge] False Bot API Error:`, err.message);
                 }

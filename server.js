@@ -3,6 +3,8 @@ const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const path = require('path');
+const fs = require('fs');
+const multer = require('multer');
 const { initDb, getDb } = require('./db');
 const BotManager = require('./BotManager');
 
@@ -14,8 +16,42 @@ const botManager = new BotManager();
 app.use(cors());
 app.use(bodyParser.json());
 
+// Setup file uploads
+const uploadsDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir);
+}
+
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => cb(null, uploadsDir),
+    filename: (req, file, cb) => {
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+        const ext = path.extname(file.originalname);
+        cb(null, file.fieldname + '-' + uniqueSuffix + ext);
+    }
+});
+const upload = multer({ storage: storage });
+
+// Serve static uploads
+app.use('/uploads', express.static(uploadsDir));
+
 // Serve the built frontend in production
 app.use(express.static(path.join(__dirname, 'frontend', 'dist')));
+
+// ─────────────────────────────────────────────
+//  Upload API
+// ─────────────────────────────────────────────
+
+// POST to upload an audio file
+app.post('/api/upload', upload.single('file'), (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+    res.json({
+        filename: req.file.filename,
+        originalname: req.file.originalname,
+        path: path.join('uploads', req.file.filename), // relative path
+        url: `/uploads/${req.file.filename}`
+    });
+});
 
 // ─────────────────────────────────────────────
 //  Provider API Routes

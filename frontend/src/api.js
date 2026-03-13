@@ -14,6 +14,18 @@ async function request(path, options = {}) {
   return data;
 }
 
+export const upload = async (file) => {
+  const fd = new FormData();
+  fd.append('file', file);
+  const res = await fetch(`${BASE}/upload`, {
+    method: 'POST',
+    body: fd
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || `Upload failed (${res.status})`);
+  return data;
+};
+
 // ── Providers ──
 export const providers = {
   list:      ()           => request('/providers'),
