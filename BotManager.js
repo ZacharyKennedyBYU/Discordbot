@@ -6,6 +6,9 @@ class BotManager {
     constructor() {
         // Map of botId -> { client, openai, config }
         this.activeBots = new Map();
+        // Map of discordMessageId -> { queue: [...], processing: bool }
+        // Used to sequence multi-bot responses to the same message
+        this.messageQueues = new Map();
     }
 
     /**
@@ -85,7 +88,7 @@ class BotManager {
             });
 
             client.on(Events.MessageCreate, async message => {
-                await this._handleMessage(botId, message);
+                await this._enqueueMessage(botId, message);
             });
 
             client.login(botRow.discord_token).catch(err => {
@@ -141,6 +144,83 @@ class BotManager {
                 });
             }
         }
+    }
+
+    /**
+     * Enqueue a message for processing. If the Discord message mentions
+     * multiple active bots, their responses are sequenced with a delay
+     * so each bot can see the previous bot's reply. Different messages
+     * get independent queues.
+     */
+    async _enqueueMessage(botId, message) {
+        const entry = this.activeBots.get(botId);
+        if (!entry) return;
+
+        // Ignore bot messages
+        if (message.author.bot) return;
+
+        // Check if this bot should respond
+        const isMentioned = message.mentions.has(entry.client.user);
+        const isDM = message.channel.isDMBased();
+        if (!isMentioned && !isDM) return;
+
+        // Count how many of our active bots are mentioned in this message
+        let mentionedBotCount = 0;
+        if (!isDM) {
+            for (const [, botEntry] of this.activeBots) {
+                if (message.mentions.has(botEntry.client.user)) {
+                    mentionedBotCount++;
+                }
+            }
+        }
+
+        // Single bot mentioned (or DM) — process immediately, no queue
+        if (mentionedBotCount <= 1) {
+            await this._handleMessage(botId, message);
+            return;
+        }
+
+        // Multi-bot mention — add to the per-message queue
+        const msgId = message.id;
+        if (!this.messageQueues.has(msgId)) {
+            this.messageQueues.set(msgId, { queue: [], processing: false });
+        }
+
+        const queueEntry = this.messageQueues.get(msgId);
+        queueEntry.queue.push({ botId, message });
+
+        // Start processing if not already running for this message
+        if (!queueEntry.processing) {
+            queueEntry.processing = true;
+            this._processQueue(msgId);
+        }
+    }
+
+    /**
+     * Process a message queue sequentially. Each bot responds one at a time
+     * with a delay so responses appear naturally in Discord.
+     */
+    async _processQueue(msgId) {
+        const queueEntry = this.messageQueues.get(msgId);
+        if (!queueEntry) return;
+
+        while (queueEntry.queue.length > 0) {
+            const { botId, message } = queueEntry.queue.shift();
+
+            try {
+                await this._handleMessage(botId, message);
+            } catch (err) {
+                console.error(`[CordBridge] Queue error for bot ${botId}:`, err.message);
+            }
+
+            // Delay before the next bot responds (if there are more in queue)
+            if (queueEntry.queue.length > 0) {
+                await new Promise(resolve => setTimeout(resolve, 1500));
+            }
+        }
+
+        // Clean up
+        this.messageQueues.delete(msgId);
     }
 
     /**
