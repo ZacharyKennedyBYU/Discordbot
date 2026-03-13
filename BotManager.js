@@ -277,6 +277,11 @@ class BotManager {
             messages.push({ role: "assistant", content: config.first_message });
         }
 
+        // 1d. Example messages: extra context for tone/style, not part of conversation
+        if (config.example_messages && config.example_messages.trim()) {
+            messages.push({ role: "system", content: `[Example messages showing how this character typically talks — use these for tone and style reference only, do not repeat them verbatim:]\n${config.example_messages}` });
+        }
+
         // 2. Fetch ALL stored messages for this bot+channel, oldest first
         const allStoredMessages = db.prepare(
             'SELECT role, content FROM messages WHERE bot_id = ? AND channel_id = ? ORDER BY created_at ASC'

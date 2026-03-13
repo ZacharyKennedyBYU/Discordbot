@@ -155,6 +155,7 @@ function _initTables() {
             system_prompt TEXT DEFAULT '',
             character_prompt TEXT DEFAULT '',
             first_message TEXT DEFAULT '',
+            example_messages TEXT DEFAULT '',
             prefill TEXT DEFAULT '',
             temperature REAL DEFAULT 0.9,
             top_p REAL DEFAULT 0.9,
@@ -184,6 +185,11 @@ function _initTables() {
     // Migration: add first_message column to existing databases
     try {
         db.exec('ALTER TABLE bots ADD COLUMN first_message TEXT DEFAULT ""');
+    } catch (_) {
+        // Column already exists — ignore
+    }
+    try {
+        db.exec('ALTER TABLE bots ADD COLUMN example_messages TEXT DEFAULT ""');
     } catch (_) {
         // Column already exists — ignore
     }

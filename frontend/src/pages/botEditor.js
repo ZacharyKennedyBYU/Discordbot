@@ -83,6 +83,10 @@ export async function render(container, botId) {
             <textarea class="form-textarea" id="bot-first-msg" rows="3" placeholder="An opening message the bot 'said' — always included in context to anchor its voice, even after clearing history...">${escapeHtml(bot?.first_message)}</textarea>
           </div>
           <div class="form-group">
+            <label class="form-label" for="bot-examples">Example Messages</label>
+            <textarea class="form-textarea" id="bot-examples" rows="4" placeholder="Example messages showing how this character talks. Used as tone/style reference only...">${escapeHtml(bot?.example_messages)}</textarea>
+          </div>
+          <div class="form-group">
             <label class="form-label" for="bot-prefill">Prefill (Assistant Start)</label>
             <textarea class="form-textarea" id="bot-prefill" rows="2" placeholder="Optional starting text...">${escapeHtml(bot?.prefill)}</textarea>
           </div>
@@ -224,6 +228,7 @@ export async function render(container, botId) {
       system_prompt: document.getElementById('bot-system').value,
       character_prompt: document.getElementById('bot-character').value,
       first_message: document.getElementById('bot-first-msg').value,
+      example_messages: document.getElementById('bot-examples').value,
       prefill: document.getElementById('bot-prefill').value,
       temperature: parseFloat(document.getElementById('bot-temp').value),
       top_p: parseFloat(document.getElementById('bot-topp').value),
