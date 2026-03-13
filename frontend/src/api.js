@@ -32,5 +32,6 @@ export const bots = {
   delete:       (id)         => request(`/bots/${id}`, { method: 'DELETE' }),
   start:        (id)         => request(`/bots/${id}/start`, { method: 'POST' }),
   stop:         (id)         => request(`/bots/${id}/stop`, { method: 'POST' }),
-  clearHistory: (id)         => request(`/bots/${id}/history`, { method: 'DELETE' }),
+  getHistory:   (id)         => request(`/bots/${id}/history`),
+  clearHistory: (id, guildId) => request(`/bots/${id}/history${guildId ? `?guild_id=${guildId}` : ''}`, { method: 'DELETE' }),
 };

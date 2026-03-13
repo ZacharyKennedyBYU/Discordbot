@@ -225,14 +225,37 @@ app.post('/api/bots/:id/stop', async (req, res) => {
     }
 });
 
-// DELETE clear a bot's conversation history
+// GET list servers a bot has history in
+app.get('/api/bots/:id/history', (req, res) => {
+    const db = getDb();
+    const existing = db.prepare('SELECT * FROM bots WHERE id = ?').get(req.params.id);
+    if (!existing) return res.status(404).json({ error: 'Bot not found' });
+
+    const servers = db.prepare(`
+        SELECT guild_id, COUNT(*) as message_count
+        FROM messages WHERE bot_id = ?
+        GROUP BY guild_id
+        ORDER BY MAX(created_at) DESC
+    `).all(req.params.id);
+
+    res.json(servers);
+});
+
+// DELETE clear a bot's conversation history (optionally filtered by guild_id)
 app.delete('/api/bots/:id/history', (req, res) => {
     const db = getDb();
     const existing = db.prepare('SELECT * FROM bots WHERE id = ?').get(req.params.id);
     if (!existing) return res.status(404).json({ error: 'Bot not found' });
 
-    const result = db.prepare('DELETE FROM messages WHERE bot_id = ?').run(req.params.id);
-    console.log(`[CordBridge] Cleared history for bot id=${req.params.id} (${result.changes} messages removed)`);
+    const guildId = req.query.guild_id;
+    let result;
+    if (guildId) {
+        result = db.prepare('DELETE FROM messages WHERE bot_id = ? AND guild_id = ?').run(req.params.id, guildId);
+        console.log(`[CordBridge] Cleared history for bot id=${req.params.id} guild=${guildId} (${result.changes} messages removed)`);
+    } else {
+        result = db.prepare('DELETE FROM messages WHERE bot_id = ?').run(req.params.id);
+        console.log(`[CordBridge] Cleared ALL history for bot id=${req.params.id} (${result.changes} messages removed)`);
+    }
     res.json({ success: true, messagesRemoved: result.changes });
 });
 

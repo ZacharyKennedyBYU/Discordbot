@@ -189,9 +189,44 @@ export async function render(container, botId) {
   const clearHistoryBtn = document.getElementById('clear-history-btn');
   if (clearHistoryBtn) {
     clearHistoryBtn.addEventListener('click', async () => {
-      if (!confirm(`Clear all conversation history for "${bot.name}"? The bot will lose its memory of past conversations.`)) return;
       try {
-        const result = await bots.clearHistory(bot.id);
+        const servers = await bots.getHistory(bot.id);
+        if (!servers || servers.length === 0) {
+          toast('No conversation history to clear', 'info');
+          return;
+        }
+
+        // Build options list
+        const options = servers.map(s => {
+          const label = s.guild_id === 'DM' || !s.guild_id ? 'Direct Messages' : `Server ${s.guild_id}`;
+          return `  • ${label} (${s.message_count} messages)`;
+        }).join('\n');
+
+        const choice = prompt(
+          `Conversation history for "${bot.name}":\n\n${options}\n\n` +
+          `Enter a server ID to clear just that server,\nor type "all" to clear everything:`
+        );
+
+        if (choice === null) return; // cancelled
+
+        const trimmed = choice.trim();
+        if (!trimmed) return;
+
+        let result;
+        if (trimmed.toLowerCase() === 'all') {
+          if (!confirm(`Clear ALL conversation history for "${bot.name}" across all servers?`)) return;
+          result = await bots.clearHistory(bot.id);
+        } else {
+          // Match against guild IDs (or "DM")
+          const matchedServer = servers.find(s =>
+            s.guild_id === trimmed || (trimmed.toLowerCase() === 'dm' && (!s.guild_id || s.guild_id === 'DM'))
+          );
+          if (!matchedServer) {
+            toast('Server ID not found in history', 'error');
+            return;
+          }
+          result = await bots.clearHistory(bot.id, matchedServer.guild_id);
+        }
         toast(`History cleared (${result.messagesRemoved} messages removed)`, 'success');
       } catch (err) {
         toast(err.message, 'error');

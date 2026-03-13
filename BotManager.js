@@ -255,10 +255,11 @@ class BotManager {
         }
 
         const channelId = message.channel.id;
+        const guildId = message.guild?.id || 'DM';
         const userContent = `${message.author.username}: ${resolvedText}`;
 
         // Save the user's message to the database (with resolved names)
-        this._saveMessage(botId, channelId, 'user', userContent);
+        this._saveMessage(botId, channelId, guildId, 'user', userContent);
 
         try {
             await message.channel.sendTyping();
@@ -297,7 +298,7 @@ class BotManager {
             }
 
             // Save the bot's response to the database
-            this._saveMessage(botId, channelId, 'assistant', replyContent);
+            this._saveMessage(botId, channelId, guildId, 'assistant', replyContent);
 
             // Chunk if over Discord's 2000 char limit
             if (replyContent.length > 2000) {
@@ -320,11 +321,11 @@ class BotManager {
     /**
      * Save a message to the database.
      */
-    _saveMessage(botId, channelId, role, content) {
+    _saveMessage(botId, channelId, guildId, role, content) {
         try {
             const db = getDb();
-            db.prepare('INSERT INTO messages (bot_id, channel_id, role, content) VALUES (?, ?, ?, ?)')
-                .run(botId, channelId, role, content);
+            db.prepare('INSERT INTO messages (bot_id, channel_id, guild_id, role, content) VALUES (?, ?, ?, ?, ?)')
+                .run(botId, channelId, guildId, role, content);
         } catch (err) {
             console.error('[CordBridge] Failed to save message:', err.message);
         }

@@ -171,6 +171,7 @@ function _initTables() {
         CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             bot_id INTEGER NOT NULL,
+            guild_id TEXT DEFAULT '',
             channel_id TEXT NOT NULL,
             role TEXT NOT NULL,
             content TEXT NOT NULL,
@@ -190,6 +191,11 @@ function _initTables() {
     }
     try {
         db.exec('ALTER TABLE bots ADD COLUMN example_messages TEXT DEFAULT ""');
+    } catch (_) {
+        // Column already exists — ignore
+    }
+    try {
+        db.exec('ALTER TABLE messages ADD COLUMN guild_id TEXT DEFAULT ""');
     } catch (_) {
         // Column already exists — ignore
     }
