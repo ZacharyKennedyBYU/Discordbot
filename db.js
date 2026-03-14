@@ -156,6 +156,7 @@ function _initTables() {
             vision_provider_id INTEGER,
             model TEXT NOT NULL DEFAULT 'deepseek/deepseek-v3.2',
             vision_model TEXT DEFAULT '',
+            use_chat_vision INTEGER DEFAULT 0,
             system_prompt TEXT DEFAULT '',
             character_prompt TEXT DEFAULT '',
             first_message TEXT DEFAULT '',
@@ -220,6 +221,11 @@ function _initTables() {
     }
     try {
         db.exec('ALTER TABLE bots ADD COLUMN false_phrases TEXT DEFAULT "[]"');
+    } catch (_) {
+        // Column already exists — ignore
+    }
+    try {
+        db.exec('ALTER TABLE bots ADD COLUMN use_chat_vision INTEGER DEFAULT 0');
     } catch (_) {
         // Column already exists — ignore
     }

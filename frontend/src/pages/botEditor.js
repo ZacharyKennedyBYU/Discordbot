@@ -72,6 +72,12 @@ export async function render(container, botId) {
               <input class="form-input" id="bot-model" type="text" list="bot-model-list" placeholder="deepseek/deepseek-v3.2" value="${escapeAttr(bot?.model || 'deepseek/deepseek-v3.2')}" autocomplete="off" />
               <datalist id="bot-model-list"></datalist>
             </div>
+            <div class="form-group" id="use-chat-vision-group" style="display: none; margin-top: -0.5rem; margin-bottom: 1rem;">
+              <label class="form-label" style="display: flex; align-items: center; gap: 0.5rem; color: var(--text-secondary); cursor: pointer;">
+                <input type="checkbox" id="use-chat-vision" ${bot?.use_chat_vision ? 'checked' : ''} style="width: 16px; height: 16px; margin: 0; cursor: pointer;" />
+                Use this chat model natively for reading images 👓
+              </label>
+            </div>
             <div class="form-group">
               <label class="form-label" for="bot-vision-provider">Vision Provider (Optional)</label>
               <select class="form-select" id="bot-vision-provider">
@@ -316,6 +322,36 @@ export async function render(container, botId) {
   // ── Dynamic Model Lists ──
   const providerSelect = document.getElementById('bot-provider');
   const visionProviderSelect = document.getElementById('bot-vision-provider');
+  const botModelInput = document.getElementById('bot-model');
+  const useChatVisionGroup = document.getElementById('use-chat-vision-group');
+  const useChatVisionCheckbox = document.getElementById('use-chat-vision');
+
+  let currentChatModels = [];
+
+  function checkChatVisionSupport(modelId) {
+    if (!currentChatModels || currentChatModels.length === 0) return false;
+    const found = currentChatModels.find(m => m.id === modelId);
+    if (!found || !found.architecture) return false;
+    
+    const instructs = found.architecture.instruct_type || '';
+    const modalities = found.architecture.modality || '';
+    const inputModes = Array.isArray(found.architecture.input_modalities) ? found.architecture.input_modalities.join(',') : '';
+
+    return modalities.includes('image') || inputModes.includes('image');
+  }
+
+  function updateVisionCheckboxVisibility() {
+    const val = botModelInput.value.trim();
+    if (checkChatVisionSupport(val)) {
+      useChatVisionGroup.style.display = 'block';
+    } else {
+      useChatVisionGroup.style.display = 'none';
+      if (useChatVisionCheckbox) useChatVisionCheckbox.checked = false;
+    }
+  }
+
+  botModelInput.addEventListener('input', updateVisionCheckboxVisibility);
+  botModelInput.addEventListener('change', updateVisionCheckboxVisibility);
 
   async function loadModels(providerId, datalistId) {
     const datalist = document.getElementById(datalistId);
@@ -325,14 +361,31 @@ export async function render(container, botId) {
       const resp = await providers.getModels(providerId);
       // Provider APIs usually return { data: [ { id, name }, ... ] }
       if (resp && resp.data && Array.isArray(resp.data)) {
+        if (datalistId === 'bot-model-list') {
+          currentChatModels = resp.data;
+        }
+
         resp.data.forEach(model => {
           const opt = document.createElement('option');
           opt.value = model.id;
-          if (model.name && model.name !== model.id) {
-             opt.textContent = model.name;
-          }
+          
+          let dispName = (model.name && model.name !== model.id) ? model.name : '';
+          
+          // Native Vision checking to append 👓
+          const isVision = datalistId === 'bot-model-list' && (
+            (model.architecture && model.architecture.modality && model.architecture.modality.includes('image')) ||
+            (model.architecture && Array.isArray(model.architecture.input_modalities) && model.architecture.input_modalities.includes('image'))
+          );
+          
+          if (isVision) dispName += ' 👓';
+
+          if (dispName) opt.textContent = dispName;
           datalist.appendChild(opt);
         });
+
+        if (datalistId === 'bot-model-list') {
+          updateVisionCheckboxVisibility();
+        }
       }
     } catch (err) {
       console.error('Failed to load models:', err);
@@ -451,6 +504,7 @@ export async function render(container, botId) {
       name: document.getElementById('bot-name').value.trim(),
       model: document.getElementById('bot-model').value.trim(),
       vision_model: document.getElementById('bot-vision-model').value.trim(),
+      use_chat_vision: document.getElementById('use-chat-vision')?.checked || false,
       provider_id: parseInt(document.getElementById('bot-provider').value) || null,
       vision_provider_id: parseInt(document.getElementById('bot-vision-provider').value) || null,
       bot_type: document.getElementById('bot-type').value,

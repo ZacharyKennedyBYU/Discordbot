@@ -294,7 +294,9 @@ class BotManager {
 
         // Generate Image Descriptions
         let imageDescriptions = [];
-        if (images.length > 0 && config.vision_model) {
+        if (images.length > 0 && config.use_chat_vision) {
+            // Native Chat Vision is enabled, skip the secondary vision model here
+        } else if (images.length > 0 && config.vision_model) {
             await message.channel.sendTyping(); // Show thinking state during vision processing
             for (let i = 0; i < images.length; i++) {
                 try {
@@ -399,6 +401,19 @@ class BotManager {
 
             // Build context from DB with compression (pass resolvedText for cross-bot awareness)
             const messages = await this._buildContext(botId, channelId, config, openai, resolvedText, message);
+
+            // NATIVE CHAT VISION INJECTION
+            if (config.use_chat_vision && images.length > 0) {
+                const userMsg = messages[messages.length - 1]; // This is the user message we just saved
+                if (userMsg && userMsg.role === 'user') {
+                    const textContent = userMsg.content;
+                    const multimodalContent = [{ type: 'text', text: textContent }];
+                    for (const imgUrl of images) {
+                        multimodalContent.push({ type: 'image_url', image_url: { url: imgUrl } });
+                    }
+                    userMsg.content = multimodalContent;
+                }
+            }
 
             // Prefill
             if (config.prefill && config.prefill.trim() !== '') {
