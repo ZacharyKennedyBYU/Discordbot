@@ -596,7 +596,7 @@ class BotManager {
             messages: [
                 {
                     role: "system",
-                    content: "You are a summarizer. Condense the following conversation into a brief summary paragraph. Preserve key facts, names, topics discussed, and any important details the users mentioned. Be concise but thorough."
+                    content: "You are an AI conversation memory summarizer. Condense the following conversation into a dense summary paragraph. CRITICAL: Pay special attention to the relationship between the bot and each unique user (or other bot) it interacts with. Note their dynamics, established rapport, stated opinions about each other, inside jokes, and key facts. Preserve names and important topics, but prioritize how characters relate to one another."
                 },
                 {
                     role: "user",
