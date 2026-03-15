@@ -529,9 +529,21 @@ class BotManager {
 
         // 3. Token budget calculation
         const totalBudget = (config.max_prompt_tokens || 10000);
-        const systemTokens = this._estimateTokens(systemContent);
-        const prefillTokens = this._estimateTokens(config.prefill || '');
-        const reservedTokens = systemTokens + prefillTokens + 50; // 50 token safety margin
+        let reservedTokens = 50; // Start with a 50 token safety margin
+
+        // Account for all tokens already placed in the 'messages' array (system prompt, first message, cross-bot context, etc)
+        for (const m of messages) {
+            reservedTokens += this._estimateTokens(m.content);
+        }
+        
+        // Add prefill token cost
+        if (config.prefill && typeof config.prefill === 'string') {
+            reservedTokens += this._estimateTokens(config.prefill);
+        }
+        
+        // Reserve an estimated 350 tokens for the AI summary string that will be injected if there is an overflow
+        reservedTokens += 350;
+
         let availableBudget = totalBudget - reservedTokens;
 
         if (availableBudget < 200) availableBudget = 200; // minimum
