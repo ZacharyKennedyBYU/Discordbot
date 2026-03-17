@@ -404,14 +404,18 @@ class BotManager {
 
             // NATIVE CHAT VISION INJECTION
             if (config.use_chat_vision && images.length > 0) {
-                const userMsg = messages[messages.length - 1]; // This is the user message we just saved
-                if (userMsg && userMsg.role === 'user') {
-                    const textContent = userMsg.content;
-                    const multimodalContent = [{ type: 'text', text: textContent }];
-                    for (const imgUrl of images) {
-                        multimodalContent.push({ type: 'image_url', image_url: { url: imgUrl } });
+                // Find the last user message to attach the images natively (searching backwards in case of appended system contexts)
+                for (let i = messages.length - 1; i >= 0; i--) {
+                    if (messages[i].role === 'user') {
+                        const userMsg = messages[i];
+                        const textContent = userMsg.content;
+                        const multimodalContent = [{ type: 'text', text: textContent }];
+                        for (const imgUrl of images) {
+                            multimodalContent.push({ type: 'image_url', image_url: { url: imgUrl } });
+                        }
+                        userMsg.content = multimodalContent;
+                        break;
                     }
-                    userMsg.content = multimodalContent;
                 }
             }
 
@@ -493,11 +497,6 @@ class BotManager {
         const allStoredMessages = db.prepare(
             'SELECT role, content FROM messages WHERE bot_id = ? AND channel_id = ? ORDER BY created_at ASC'
         ).all(botId, channelId);
-
-        const channelContext = await this._fetchChannelContext(discordMessage, allStoredMessages);
-        if (channelContext) {
-            messages.push({ role: "system", content: channelContext });
-        }
 
         // 1b. Cross-bot awareness: if the user mentions another bot by name,
         //     inject that bot's character prompt so this bot knows about them
@@ -591,6 +590,13 @@ class BotManager {
         // 6. Append the recent messages (verbatim)
         messages.push(...recentMessages);
 
+        // 7. Ambient channel context: fetch recent Discord messages for situational awareness
+        // Placed at the very end so it chronologically represents immediate surrounding events
+        const channelContext = await this._fetchChannelContext(botId, discordMessage, allStoredMessages);
+        if (channelContext) {
+            messages.push({ role: "system", content: channelContext });
+        }
+
         return messages;
     }
 
@@ -669,8 +675,11 @@ class BotManager {
      * Filters out messages already in saved conversation history.
      * Returns a formatted system message or null if nothing useful.
      */
-    async _fetchChannelContext(discordMessage, savedMessages) {
+    async _fetchChannelContext(botId, discordMessage, savedMessages) {
         if (!discordMessage || discordMessage.channel.isDMBased()) return null;
+
+        const entry = this.activeBots.get(botId);
+        const botDiscordId = entry ? entry.client.user.id : null;
 
         try {
             const fetched = await discordMessage.channel.messages.fetch({ limit: 15 });
@@ -683,6 +692,10 @@ class BotManager {
             for (const msg of channelMsgs) {
                 // Skip the triggering message itself (it's already saved)
                 if (msg.id === discordMessage.id) continue;
+                
+                // Skip messages sent by THIS specific bot to prevent reading its own output
+                // as though it were third-party background activity
+                if (botDiscordId && msg.author.id === botDiscordId) continue;
 
                 let text = msg.content.trim();
                 if (!text) continue;
