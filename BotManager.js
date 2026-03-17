@@ -488,17 +488,28 @@ class BotManager {
         const db = getDb();
         const messages = [];
 
-        // 1. System prompt (always first)
-        const systemContent = `${config.system_prompt || ''}\n\n${config.character_prompt || ''}`.trim();
-        if (systemContent) {
-            messages.push({ role: "system", content: systemContent });
+        // 1a. Ambient channel context: fetch recent Discord messages for awareness
+        //     These are NOT saved — they're ephemeral background context
+        const allStoredMessages = db.prepare(
+            'SELECT role, content FROM messages WHERE bot_id = ? AND channel_id = ? ORDER BY created_at ASC'
+        ).all(botId, channelId);
+
+        const channelContext = await this._fetchChannelContext(discordMessage, allStoredMessages);
+        if (channelContext) {
+            messages.push({ role: "system", content: channelContext });
         }
 
         // 1b. Cross-bot awareness: if the user mentions another bot by name,
         //     inject that bot's character prompt so this bot knows about them
-        const crossBotInfo = this._getReferencedBotInfo(botId, userText);
+        const crossBotInfo = this._getReferencedBotInfo(config, userText);
         if (crossBotInfo) {
             messages.push({ role: "system", content: crossBotInfo });
+        }
+
+        // 1c. System prompt (always placed AFTER the ambient stuff so it's the strongest instruction)
+        const systemContent = `${config.system_prompt || ''}\n\n${config.character_prompt || ''}`.trim();
+        if (systemContent) {
+            messages.push({ role: "system", content: `[YOUR IDENTITY AND INSTRUCTIONS]\n${systemContent}` });
         }
 
         // 1c. Identity anchor: always inject first_message so the bot knows its voice
@@ -511,16 +522,9 @@ class BotManager {
             messages.push({ role: "system", content: `[Example messages showing how this character typically talks — use these for tone and style reference only, do not repeat them verbatim:]\n${config.example_messages}` });
         }
 
-        // 2. Fetch ALL stored messages for this bot+channel, oldest first
-        const allStoredMessages = db.prepare(
-            'SELECT role, content FROM messages WHERE bot_id = ? AND channel_id = ? ORDER BY created_at ASC'
-        ).all(botId, channelId);
-
-        // 2b. Ambient channel context: fetch recent Discord messages for awareness
-        //     These are NOT saved — they're ephemeral background context
-        const channelContext = await this._fetchChannelContext(discordMessage, allStoredMessages);
-        if (channelContext) {
-            messages.push({ role: "system", content: channelContext });
+        // 2. We already fetched ALL stored messages above into allStoredMessages
+        if (allStoredMessages.length === 0) {
+            return messages;
         }
 
         if (allStoredMessages.length === 0) {
@@ -627,11 +631,11 @@ class BotManager {
      * If so, return a system message with those bots' character prompts.
      * Handles case-insensitive matching and @ prefixes.
      */
-    _getReferencedBotInfo(currentBotId, userText) {
+    _getReferencedBotInfo(currentBotConfig, userText) {
         if (!userText) return null;
 
         const db = getDb();
-        const allBots = db.prepare('SELECT id, name, character_prompt FROM bots WHERE id != ?').all(currentBotId);
+        const allBots = db.prepare('SELECT id, name, character_prompt FROM bots WHERE id != ?').all(currentBotConfig.id);
 
         if (allBots.length === 0) return null;
 
@@ -654,10 +658,10 @@ class BotManager {
         if (matchedBots.length === 0) return null;
 
         const infoParts = matchedBots.map(bot =>
-            `[About "${bot.name}"]: ${bot.character_prompt}`
+            `<character_info>\nName: ${bot.name}\nPersona: ${bot.character_prompt}\n</character_info>`
         );
 
-        return `[The user is asking about other bot(s). Here is info about them for reference:]\n${infoParts.join('\n')}`;
+        return `[CRITICAL CONTEXT: The user mentioned other character(s) in this conversation. Below is their character information for your awareness only. You must NOT roleplay as them. You must strictly remain "${currentBotConfig.name}".]\n\n${infoParts.join('\n\n')}`;
     }
 
     /**
