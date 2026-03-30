@@ -236,6 +236,7 @@ export async function render(container, botId) {
   const promptsCard = document.getElementById('prompts-card');
   const paramsCard = document.getElementById('params-card');
   const falsePhrasesCard = document.getElementById('false-phrases-card');
+  const lorebooksCard = document.getElementById('lorebooks-card');
   
   let falsePhrases = [];
   try {
@@ -257,7 +258,6 @@ export async function render(container, botId) {
   updateTypeVisibility();
 
   // ── Lorebook Logic ──
-  const lorebooksCard = document.getElementById('lorebooks-card');
   const lbAttachSelect = document.getElementById('lb-attach-select');
   const lbAttachBtn = document.getElementById('lb-attach-btn');
   const attachedLbContainer = document.getElementById('attached-lorebooks');
@@ -275,7 +275,8 @@ export async function render(container, botId) {
   function populateLbSelect() {
     lbAttachSelect.innerHTML = '<option value="">— Select a lorebook to attach —</option>';
     const attachedIds = attachedLorebooks.map(a => a.lorebook_id);
-    allLorebooks.filter(lb => !attachedIds.includes(lb.id)).forEach(lb => {
+    const available = allLorebooks.filter(lb => !attachedIds.includes(lb.id));
+    available.forEach(lb => {
       const opt = document.createElement('option');
       opt.value = lb.id;
       opt.textContent = `${lb.name} (${lb.entry_count || 0} entries)`;

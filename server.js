@@ -341,7 +341,7 @@ app.get('/api/lorebooks', (req, res) => {
             const parsed = JSON.parse(lb.data || '{}');
             if (parsed.entries) entryCount = Object.keys(parsed.entries).length;
         } catch (_) {}
-        return { ...lb, entry_count: entryCount };
+        return { id: lb.id, name: lb.name, entry_count: entryCount, created_at: lb.created_at };
     });
     res.json(result);
 });
