@@ -47,4 +47,16 @@ export const bots = {
   stop:         (id)         => request(`/bots/${id}/stop`, { method: 'POST' }),
   getHistory:   (id)         => request(`/bots/${id}/history`),
   clearHistory: (id, guildId) => request(`/bots/${id}/history${guildId ? `?guild_id=${guildId}` : ''}`, { method: 'DELETE' }),
+  getLorebooks:    (id)              => request(`/bots/${id}/lorebooks`),
+  attachLorebook:  (id, lorebookId)  => request(`/bots/${id}/lorebooks`, { method: 'POST', body: JSON.stringify({ lorebook_id: lorebookId }) }),
+  updateLorebook:  (id, lbId, overrides) => request(`/bots/${id}/lorebooks/${lbId}`, { method: 'PUT', body: JSON.stringify({ overrides }) }),
+  detachLorebook:  (id, lbId)        => request(`/bots/${id}/lorebooks/${lbId}`, { method: 'DELETE' }),
+};
+
+// ── Lorebooks ──
+export const lorebooks = {
+  list:   ()       => request('/lorebooks'),
+  get:    (id)     => request(`/lorebooks/${id}`),
+  create: (body)   => request('/lorebooks', { method: 'POST', body: JSON.stringify(body) }),
+  delete: (id)     => request(`/lorebooks/${id}`, { method: 'DELETE' }),
 };

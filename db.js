@@ -186,6 +186,22 @@ function _initTables() {
 
         CREATE INDEX IF NOT EXISTS idx_messages_lookup
             ON messages(bot_id, channel_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS lorebooks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            data TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS bot_lorebooks (
+            bot_id INTEGER NOT NULL,
+            lorebook_id INTEGER NOT NULL,
+            overrides TEXT DEFAULT '{}',
+            PRIMARY KEY (bot_id, lorebook_id),
+            FOREIGN KEY (bot_id) REFERENCES bots(id) ON DELETE CASCADE,
+            FOREIGN KEY (lorebook_id) REFERENCES lorebooks(id) ON DELETE CASCADE
+        );
     `);
 
     // Migration: add first_message column to existing databases

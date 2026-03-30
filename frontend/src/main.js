@@ -6,6 +6,7 @@ import './style.css';
 import * as dashboard from './pages/dashboard.js';
 import * as botEditor from './pages/botEditor.js';
 import * as providersPage from './pages/providers.js';
+import * as lorebooksPage from './pages/lorebooks.js';
 
 const app = document.getElementById('app');
 let currentPage = null;
@@ -21,6 +22,7 @@ function renderNavbar(activeRoute) {
       <div class="navbar-links">
         <a href="#/" class="${activeRoute === 'dashboard' ? 'active' : ''}">Dashboard</a>
         <a href="#/providers" class="${activeRoute === 'providers' ? 'active' : ''}">Providers</a>
+        <a href="#/lorebooks" class="${activeRoute === 'lorebooks' ? 'active' : ''}">Lorebooks</a>
       </div>
     </nav>
   `;
@@ -36,6 +38,7 @@ async function route() {
   // Determine route
   let activeRoute = 'dashboard';
   if (hash.startsWith('#/providers')) activeRoute = 'providers';
+  else if (hash.startsWith('#/lorebooks')) activeRoute = 'lorebooks';
   else if (hash.startsWith('#/bots/')) activeRoute = 'botEditor';
 
   // Render navbar + page container
@@ -45,6 +48,9 @@ async function route() {
   if (activeRoute === 'providers') {
     currentPage = providersPage;
     await providersPage.render(content);
+  } else if (activeRoute === 'lorebooks') {
+    currentPage = lorebooksPage;
+    await lorebooksPage.render(content);
   } else if (activeRoute === 'botEditor') {
     const botId = hash.split('/').pop(); // 'new' or numeric id
     currentPage = botEditor;

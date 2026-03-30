@@ -511,6 +511,12 @@ class BotManager {
             messages.push({ role: "system", content: `[YOUR IDENTITY AND INSTRUCTIONS]\n${systemContent}` });
         }
 
+        // 1c-ii. Lorebook context: inject matched lorebook entries after system prompt
+        const lorebookContext = this._buildLorebookContext(botId, userText);
+        if (lorebookContext) {
+            messages.push({ role: "system", content: lorebookContext });
+        }
+
         // 1c. Identity anchor: always inject first_message so the bot knows its voice
         if (config.first_message && config.first_message.trim()) {
             messages.push({ role: "assistant", content: config.first_message });
@@ -630,6 +636,71 @@ class BotManager {
         });
 
         return response.choices[0].message.content.trim();
+    }
+
+    /**
+     * Build lorebook context for a bot based on attached lorebooks and user text.
+     * Returns a system message string with matched entries, or null.
+     */
+    _buildLorebookContext(botId, userText) {
+        const db = getDb();
+        const rows = db.prepare(`
+            SELECT bl.overrides, l.data
+            FROM bot_lorebooks bl
+            JOIN lorebooks l ON bl.lorebook_id = l.id
+            WHERE bl.bot_id = ?
+        `).all(botId);
+
+        if (rows.length === 0) return null;
+
+        const matchedEntries = [];
+        const lowerText = (userText || '').toLowerCase();
+
+        for (const row of rows) {
+            let lorebookData, overrides;
+            try {
+                lorebookData = JSON.parse(row.data);
+                overrides = JSON.parse(row.overrides || '{}');
+            } catch (e) {
+                continue;
+            }
+
+            if (!lorebookData.entries) continue;
+
+            for (const [uid, entry] of Object.entries(lorebookData.entries)) {
+                if (!entry.content) continue;
+
+                // Determine state: check override first, then fall back to entry defaults
+                const state = overrides[uid] || overrides[entry.uid] || 'moon'; // default is moon
+
+                if (state === 'off') continue;
+
+                if (state === 'sun') {
+                    // Always include
+                    matchedEntries.push(entry.content);
+                    continue;
+                }
+
+                // state === 'moon': check if any key or secondary key matches in user text
+                const allKeys = [
+                    ...(Array.isArray(entry.key) ? entry.key : (entry.keys || [])),
+                    ...(Array.isArray(entry.keysecondary) ? entry.keysecondary : (entry.secondary_keys || []))
+                ];
+
+                const matched = allKeys.some(k => {
+                    if (!k) return false;
+                    return lowerText.includes(k.toLowerCase());
+                });
+
+                if (matched) {
+                    matchedEntries.push(entry.content);
+                }
+            }
+        }
+
+        if (matchedEntries.length === 0) return null;
+
+        return `[Lorebook Context — relevant world information]\n${matchedEntries.join('\n\n')}`;
     }
 
     /**

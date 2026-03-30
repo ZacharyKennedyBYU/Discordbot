@@ -2,7 +2,7 @@
 //  CordBridge — Bot Editor Page
 // ═══════════════════════════════════════════════
 
-import { bots, providers, upload } from '../api.js';
+import { bots, providers, upload, lorebooks } from '../api.js';
 import { toast } from '../toast.js';
 
 export function destroy() {}
@@ -11,11 +11,15 @@ export async function render(container, botId) {
   const isNew = botId === 'new';
   let bot = null;
   let providerList = [];
+  let allLorebooks = [];
+  let attachedLorebooks = [];
 
   try {
     providerList = await providers.list();
+    allLorebooks = await lorebooks.list();
     if (!isNew) {
       bot = await bots.get(parseInt(botId));
+      attachedLorebooks = await bots.getLorebooks(parseInt(botId));
     }
   } catch (err) {
     container.innerHTML = `<div class="page"><p style="color:var(--danger)">Error loading data: ${err.message}</p></div>`;
@@ -119,6 +123,19 @@ export async function render(container, botId) {
             <label class="form-label" for="bot-prefill">Prefill (Assistant Start)</label>
             <textarea class="form-textarea" id="bot-prefill" rows="2" placeholder="Optional starting text...">${escapeHtml(bot?.prefill)}</textarea>
           </div>
+        </div>
+
+        <!-- Lorebooks -->
+        <div class="card" id="lorebooks-card" style="margin-bottom: 1.5rem;">
+          <h3 style="margin-bottom: 1rem;">📚 Lorebooks</h3>
+          <p style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 1rem;">Attach world info lorebooks. Each entry can be ☀️ always on, 🌙 on when mentioned, or ✖ off.</p>
+          <div style="display: flex; gap: 0.5rem; margin-bottom: 1rem;" id="lb-attach-row">
+            <select class="form-select" id="lb-attach-select" style="flex: 1;">
+              <option value="">— Select a lorebook to attach —</option>
+            </select>
+            <button type="button" class="btn btn-primary" id="lb-attach-btn">Attach</button>
+          </div>
+          <div id="attached-lorebooks"></div>
         </div>
 
         <!-- Parameters -->
@@ -232,11 +249,171 @@ export async function render(container, botId) {
     if (aiConfigCard) aiConfigCard.style.display = isFalse ? 'none' : 'block';
     if (promptsCard) promptsCard.style.display = isFalse ? 'none' : 'block';
     if (paramsCard) paramsCard.style.display = isFalse ? 'none' : 'block';
+    if (lorebooksCard) lorebooksCard.style.display = isFalse ? 'none' : 'block';
     if (falsePhrasesCard) falsePhrasesCard.style.display = isFalse ? 'block' : 'none';
   }
   
   botTypeSelect.addEventListener('change', updateTypeVisibility);
   updateTypeVisibility();
+
+  // ── Lorebook Logic ──
+  const lorebooksCard = document.getElementById('lorebooks-card');
+  const lbAttachSelect = document.getElementById('lb-attach-select');
+  const lbAttachBtn = document.getElementById('lb-attach-btn');
+  const attachedLbContainer = document.getElementById('attached-lorebooks');
+
+  // Track overrides per lorebook_id
+  let lorebookOverrides = {};
+  for (const alb of attachedLorebooks) {
+    try {
+      lorebookOverrides[alb.lorebook_id] = typeof alb.overrides === 'string' ? JSON.parse(alb.overrides || '{}') : (alb.overrides || {});
+    } catch(e) {
+      lorebookOverrides[alb.lorebook_id] = {};
+    }
+  }
+
+  function populateLbSelect() {
+    lbAttachSelect.innerHTML = '<option value="">— Select a lorebook to attach —</option>';
+    const attachedIds = attachedLorebooks.map(a => a.lorebook_id);
+    allLorebooks.filter(lb => !attachedIds.includes(lb.id)).forEach(lb => {
+      const opt = document.createElement('option');
+      opt.value = lb.id;
+      opt.textContent = `${lb.name} (${lb.entry_count || 0} entries)`;
+      lbAttachSelect.appendChild(opt);
+    });
+  }
+  populateLbSelect();
+
+  function getStateIcon(state) {
+    if (state === 'sun') return '☀️';
+    if (state === 'off') return '✖';
+    return '🌙';
+  }
+
+  function nextState(current) {
+    if (current === 'moon') return 'sun';
+    if (current === 'sun') return 'off';
+    return 'moon';
+  }
+
+  function renderAttachedLorebooks() {
+    if (attachedLorebooks.length === 0) {
+      attachedLbContainer.innerHTML = '<p style="color: var(--text-secondary); text-align: center;">No lorebooks attached.</p>';
+      return;
+    }
+
+    attachedLbContainer.innerHTML = attachedLorebooks.map(alb => {
+      let entries = [];
+      try {
+        const parsed = typeof alb.data === 'string' ? JSON.parse(alb.data) : alb.data;
+        if (parsed.entries) entries = Object.entries(parsed.entries);
+      } catch(e) {}
+
+      const overrides = lorebookOverrides[alb.lorebook_id] || {};
+
+      return `
+        <div class="lb-attached-item" data-lbid="${alb.lorebook_id}">
+          <div class="lb-attached-header">
+            <div style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;" class="lb-toggle-expand">
+              <span class="lb-expand-arrow">▶</span>
+              <strong>${escapeHtml(alb.name)}</strong>
+              <span style="color: var(--text-secondary); font-size: 0.85rem;">${entries.length} entries</span>
+            </div>
+            <button type="button" class="btn btn-ghost" data-detach-lb="${alb.lorebook_id}" style="padding: 0.25rem 0.5rem; color: var(--danger); font-size: 0.8rem;">Detach</button>
+          </div>
+          <div class="lb-entries-list" style="display: none;">
+            ${entries.map(([uid, entry]) => {
+              const state = overrides[uid] || 'moon';
+              const name = entry.comment || entry.name || `Entry ${uid}`;
+              const keys = (Array.isArray(entry.key) ? entry.key : (entry.keys || [])).join(', ');
+              return `
+                <div class="lb-entry-row">
+                  <button type="button" class="lb-state-btn" data-lbid="${alb.lorebook_id}" data-uid="${uid}" data-state="${state}" title="Click to cycle: 🌙 mentioned → ☀️ always → ✖ off">
+                    ${getStateIcon(state)}
+                  </button>
+                  <div class="lb-entry-info">
+                    <span class="lb-entry-name">${escapeHtml(name)}</span>
+                    <span class="lb-entry-keys">${escapeHtml(keys)}</span>
+                  </div>
+                </div>
+              `;
+            }).join('')}
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    // Wire up expand/collapse
+    attachedLbContainer.querySelectorAll('.lb-toggle-expand').forEach(el => {
+      el.addEventListener('click', () => {
+        const item = el.closest('.lb-attached-item');
+        const list = item.querySelector('.lb-entries-list');
+        const arrow = item.querySelector('.lb-expand-arrow');
+        const isVisible = list.style.display !== 'none';
+        list.style.display = isVisible ? 'none' : 'block';
+        arrow.textContent = isVisible ? '▶' : '▼';
+      });
+    });
+
+    // Wire up state toggle buttons
+    attachedLbContainer.querySelectorAll('.lb-state-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const lbid = btn.dataset.lbid;
+        const uid = btn.dataset.uid;
+        const current = btn.dataset.state;
+        const next = nextState(current);
+        btn.dataset.state = next;
+        btn.textContent = getStateIcon(next);
+        if (!lorebookOverrides[lbid]) lorebookOverrides[lbid] = {};
+        lorebookOverrides[lbid][uid] = next;
+      });
+    });
+
+    // Wire up detach buttons
+    attachedLbContainer.querySelectorAll('[data-detach-lb]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const lbid = parseInt(btn.dataset.detachLb);
+        const lb = attachedLorebooks.find(a => a.lorebook_id === lbid);
+        if (!confirm(`Detach lorebook "${lb?.name}" from this bot?`)) return;
+        try {
+          if (!isNew) await bots.detachLorebook(parseInt(botId), lbid);
+          attachedLorebooks = attachedLorebooks.filter(a => a.lorebook_id !== lbid);
+          delete lorebookOverrides[lbid];
+          renderAttachedLorebooks();
+          populateLbSelect();
+          toast('Lorebook detached', 'success');
+        } catch (err) {
+          toast(err.message, 'error');
+        }
+      });
+    });
+  }
+  renderAttachedLorebooks();
+
+  lbAttachBtn.addEventListener('click', async () => {
+    const lbId = parseInt(lbAttachSelect.value);
+    if (!lbId) return toast('Select a lorebook first', 'error');
+    try {
+      if (!isNew) {
+        await bots.attachLorebook(parseInt(botId), lbId);
+      }
+      // Fetch full lorebook data for display
+      const fullLb = await lorebooks.get(lbId);
+      const lbMeta = allLorebooks.find(l => l.id === lbId);
+      attachedLorebooks.push({
+        lorebook_id: lbId,
+        name: lbMeta?.name || fullLb.name,
+        data: fullLb.data,
+        overrides: '{}'
+      });
+      lorebookOverrides[lbId] = {};
+      renderAttachedLorebooks();
+      populateLbSelect();
+      toast('Lorebook attached', 'success');
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  });
 
   // Render phrases list
   const phrasesListEl = document.getElementById('phrases-list');
@@ -542,10 +719,29 @@ export async function render(container, botId) {
 
     try {
       if (isNew) {
-        await bots.create(body);
+        const created = await bots.create(body);
+        // Attach lorebooks to the newly created bot
+        for (const alb of attachedLorebooks) {
+          try {
+            await bots.attachLorebook(created.id, alb.lorebook_id);
+            const ovr = lorebookOverrides[alb.lorebook_id];
+            if (ovr && Object.keys(ovr).length > 0) {
+              await bots.updateLorebook(created.id, alb.lorebook_id, ovr);
+            }
+          } catch(e) { console.error('Failed to attach lorebook:', e); }
+        }
         toast('Bot created!', 'success');
       } else {
         await bots.update(bot.id, body);
+        // Save lorebook overrides
+        for (const alb of attachedLorebooks) {
+          const ovr = lorebookOverrides[alb.lorebook_id];
+          if (ovr) {
+            try {
+              await bots.updateLorebook(bot.id, alb.lorebook_id, ovr);
+            } catch(e) { console.error('Failed to save lorebook overrides:', e); }
+          }
+        }
         toast('Bot updated!', 'success');
       }
       window.location.hash = '#/';

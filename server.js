@@ -14,7 +14,7 @@ const botManager = new BotManager();
 
 // Middleware
 app.use(cors());
-app.use(bodyParser.json());
+app.use(bodyParser.json({ limit: '5mb' }));
 
 // Setup file uploads
 const uploadsDir = path.join(__dirname, 'uploads');
@@ -324,6 +324,120 @@ app.delete('/api/bots/:id/history', (req, res) => {
         console.log(`[CordBridge] Cleared ALL history for bot id=${req.params.id} (${result.changes} messages removed)`);
     }
     res.json({ success: true, messagesRemoved: result.changes });
+});
+
+// ─────────────────────────────────────────────
+//  Lorebook API Routes
+// ─────────────────────────────────────────────
+
+// GET all lorebooks
+app.get('/api/lorebooks', (req, res) => {
+    const db = getDb();
+    const lorebooks = db.prepare('SELECT id, name, data, created_at FROM lorebooks').all();
+    // Add entry count from parsed data
+    const result = lorebooks.map(lb => {
+        let entryCount = 0;
+        try {
+            const parsed = JSON.parse(lb.data || '{}');
+            if (parsed.entries) entryCount = Object.keys(parsed.entries).length;
+        } catch (_) {}
+        return { ...lb, entry_count: entryCount };
+    });
+    res.json(result);
+});
+
+// GET a single lorebook with full data
+app.get('/api/lorebooks/:id', (req, res) => {
+    const db = getDb();
+    const lb = db.prepare('SELECT * FROM lorebooks WHERE id = ?').get(req.params.id);
+    if (!lb) return res.status(404).json({ error: 'Lorebook not found' });
+    res.json(lb);
+});
+
+// POST create a lorebook
+app.post('/api/lorebooks', (req, res) => {
+    const { name, data } = req.body;
+    if (!name || !data) return res.status(400).json({ error: 'name and data are required.' });
+
+    // Validate JSON structure
+    let parsed;
+    try {
+        parsed = typeof data === 'string' ? JSON.parse(data) : data;
+    } catch (e) {
+        return res.status(400).json({ error: 'Invalid JSON data.' });
+    }
+
+    if (!parsed.entries) {
+        return res.status(400).json({ error: 'Lorebook JSON must contain an "entries" object.' });
+    }
+
+    const db = getDb();
+    const jsonStr = typeof data === 'string' ? data : JSON.stringify(data);
+    const result = db.prepare('INSERT INTO lorebooks (name, data) VALUES (?, ?)').run(name, jsonStr);
+    res.json({ id: result.lastInsertRowid, name });
+});
+
+// DELETE a lorebook
+app.delete('/api/lorebooks/:id', (req, res) => {
+    const db = getDb();
+    const existing = db.prepare('SELECT * FROM lorebooks WHERE id = ?').get(req.params.id);
+    if (!existing) return res.status(404).json({ error: 'Lorebook not found' });
+    db.prepare('DELETE FROM lorebooks WHERE id = ?').run(req.params.id);
+    res.json({ success: true });
+});
+
+// GET lorebooks attached to a bot
+app.get('/api/bots/:id/lorebooks', (req, res) => {
+    const db = getDb();
+    const rows = db.prepare(`
+        SELECT bl.lorebook_id, bl.overrides, l.name, l.data
+        FROM bot_lorebooks bl
+        JOIN lorebooks l ON bl.lorebook_id = l.id
+        WHERE bl.bot_id = ?
+    `).all(req.params.id);
+    res.json(rows);
+});
+
+// POST attach a lorebook to a bot
+app.post('/api/bots/:id/lorebooks', (req, res) => {
+    const { lorebook_id } = req.body;
+    if (!lorebook_id) return res.status(400).json({ error: 'lorebook_id is required.' });
+
+    const db = getDb();
+    const bot = db.prepare('SELECT id FROM bots WHERE id = ?').get(req.params.id);
+    if (!bot) return res.status(404).json({ error: 'Bot not found' });
+    const lb = db.prepare('SELECT id FROM lorebooks WHERE id = ?').get(lorebook_id);
+    if (!lb) return res.status(404).json({ error: 'Lorebook not found' });
+
+    // Check if already attached
+    const existing = db.prepare('SELECT * FROM bot_lorebooks WHERE bot_id = ? AND lorebook_id = ?').get(req.params.id, lorebook_id);
+    if (existing) return res.status(400).json({ error: 'Lorebook is already attached to this bot.' });
+
+    db.prepare('INSERT INTO bot_lorebooks (bot_id, lorebook_id, overrides) VALUES (?, ?, ?)').run(req.params.id, lorebook_id, '{}');
+    res.json({ success: true });
+});
+
+// PUT update lorebook overrides for a bot
+app.put('/api/bots/:id/lorebooks/:lorebookId', (req, res) => {
+    const { overrides } = req.body;
+    if (overrides === undefined) return res.status(400).json({ error: 'overrides is required.' });
+
+    const db = getDb();
+    const existing = db.prepare('SELECT * FROM bot_lorebooks WHERE bot_id = ? AND lorebook_id = ?').get(req.params.id, req.params.lorebookId);
+    if (!existing) return res.status(404).json({ error: 'Bot-lorebook association not found.' });
+
+    const overridesStr = typeof overrides === 'string' ? overrides : JSON.stringify(overrides);
+    db.prepare('UPDATE bot_lorebooks SET overrides = ? WHERE bot_id = ? AND lorebook_id = ?').run(overridesStr, req.params.id, req.params.lorebookId);
+    res.json({ success: true });
+});
+
+// DELETE detach a lorebook from a bot
+app.delete('/api/bots/:id/lorebooks/:lorebookId', (req, res) => {
+    const db = getDb();
+    const existing = db.prepare('SELECT * FROM bot_lorebooks WHERE bot_id = ? AND lorebook_id = ?').get(req.params.id, req.params.lorebookId);
+    if (!existing) return res.status(404).json({ error: 'Bot-lorebook association not found.' });
+    db.prepare('DELETE FROM bot_lorebooks WHERE bot_id = ? AND lorebook_id = ?').run(req.params.id, req.params.lorebookId);
+    res.json({ success: true });
 });
 
 // SPA fallback — serve index.html for all non-API routes
