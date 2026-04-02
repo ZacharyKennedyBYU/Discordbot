@@ -169,6 +169,7 @@ function _initTables() {
             presence_penalty REAL DEFAULT 0.0,
             frequency_penalty REAL DEFAULT 0.0,
             auto_start INTEGER DEFAULT 0,
+            allowed_guilds TEXT DEFAULT '[]',
             created_at TEXT DEFAULT (datetime('now')),
             FOREIGN KEY (provider_id) REFERENCES providers(id) ON DELETE SET NULL
         );
@@ -242,6 +243,11 @@ function _initTables() {
     }
     try {
         db.exec('ALTER TABLE bots ADD COLUMN use_chat_vision INTEGER DEFAULT 0');
+    } catch (_) {
+        // Column already exists — ignore
+    }
+    try {
+        db.exec('ALTER TABLE bots ADD COLUMN allowed_guilds TEXT DEFAULT "[]"');
     } catch (_) {
         // Column already exists — ignore
     }

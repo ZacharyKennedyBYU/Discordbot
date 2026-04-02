@@ -182,9 +182,24 @@ class BotManager {
         // Ignore bot messages
         if (message.author.bot) return;
 
+        const isDM = message.channel.isDMBased();
+
+        // ── ALLOWLIST LOGIC ──
+        if (!isDM) {
+            let allowedGuilds = [];
+            try {
+                if (entry.config.allowed_guilds) {
+                    allowedGuilds = JSON.parse(entry.config.allowed_guilds);
+                }
+            } catch (_) {}
+            
+            if (allowedGuilds.length > 0 && !allowedGuilds.includes(message.guild?.id)) {
+                return; // Dropped message because server is not in the allowlist
+            }
+        }
+
         // Check if this bot should respond
         const isMentioned = message.mentions.has(entry.client.user);
-        const isDM = message.channel.isDMBased();
         if (!isMentioned && !isDM) return;
 
         // Count how many of our active bots are mentioned in this message

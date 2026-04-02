@@ -28,6 +28,15 @@ export async function render(container, botId) {
 
   const title = isNew ? 'Create New Bot' : `Edit — ${escapeHtml(bot.name)}`;
 
+  function parseAllowedGuilds(jsonStr) {
+    if (!jsonStr) return "";
+    try {
+      const arr = JSON.parse(jsonStr);
+      if (Array.isArray(arr)) return arr.join(', ');
+    } catch (_) {}
+    return "";
+  }
+
   container.innerHTML = `
     <div class="page" style="max-width: 760px;">
       <div class="page-header">
@@ -55,6 +64,10 @@ export async function render(container, botId) {
               <option value="real" ${bot?.bot_type !== 'false' ? 'selected' : ''}>Real AI Bot</option>
               <option value="false" ${bot?.bot_type === 'false' ? 'selected' : ''}>False Bot (Random Phrases)</option>
             </select>
+          </div>
+          <div class="form-group" style="margin-top: 1rem;">
+            <label class="form-label" for="bot-allowed-guilds">Allowed Server IDs (Comma separated, leave empty for all servers)</label>
+            <input class="form-input" id="bot-allowed-guilds" type="text" placeholder="1234567890, 0987654321" value="${escapeAttr(parseAllowedGuilds(bot?.allowed_guilds))}" />
           </div>
         </div>
 
@@ -699,6 +712,7 @@ export async function render(container, botId) {
       presence_penalty: parseFloat(document.getElementById('bot-pp').value),
       frequency_penalty: parseFloat(document.getElementById('bot-fp').value),
       auto_start: document.getElementById('bot-autostart').checked,
+      allowed_guilds: JSON.stringify(document.getElementById('bot-allowed-guilds').value.split(',').map(s => s.trim()).filter(s => s)),
     };
 
     const token = document.getElementById('bot-token').value.trim();
