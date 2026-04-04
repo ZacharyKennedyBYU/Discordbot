@@ -182,9 +182,9 @@ class BotManager {
         // Ignore bot messages
         if (message.author.bot) return;
 
-        // URL Embed loading hack (give Discord 1.5s to generate the embed if it's a link)
+        // URL Embed loading hack (give Discord 2.5s to generate the embed if it's a link)
         if (message.content.includes('http') && message.embeds.length === 0) {
-            await new Promise(r => setTimeout(r, 1500));
+            await new Promise(r => setTimeout(r, 2500));
             try {
                 message = await message.channel.messages.fetch(message.id);
             } catch(e) {}
