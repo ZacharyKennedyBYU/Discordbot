@@ -37,6 +37,15 @@ export async function render(container, botId) {
     return "";
   }
 
+  function parseStringArray(jsonStr) {
+    if (!jsonStr) return "";
+    try {
+      const arr = JSON.parse(jsonStr);
+      if (Array.isArray(arr)) return arr.join(', ');
+    } catch (_) {}
+    return "";
+  }
+
   container.innerHTML = `
     <div class="page" style="max-width: 760px;">
       <div class="page-header">
@@ -67,7 +76,7 @@ export async function render(container, botId) {
           </div>
           <div class="form-group" style="margin-top: 1rem;">
             <label class="form-label" for="bot-allowed-guilds">Allowed Server IDs (Comma separated, leave empty for all servers)</label>
-            <input class="form-input" id="bot-allowed-guilds" type="text" placeholder="1234567890, 0987654321" value="${escapeAttr(parseAllowedGuilds(bot?.allowed_guilds))}" />
+            <input class="form-input" id="bot-allowed-guilds" type="text" placeholder="1234567890, 0987654321" value="${escapeAttr(parseStringArray(bot?.allowed_guilds))}" />
           </div>
         </div>
 
@@ -110,6 +119,11 @@ export async function render(container, botId) {
               <datalist id="bot-vision-model-list"></datalist>
               <p style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.25rem;">Used to read images attached to messages or replied-to messages.</p>
             </div>
+          </div>
+          <div class="form-group" style="margin-top: 1rem;">
+            <label class="form-label" for="bot-providers-order">OpenRouter Providers (Optional, Comma separated)</label>
+            <input class="form-input" id="bot-providers-order" type="text" placeholder="Anthropic, Google, Together" value="${escapeAttr(parseStringArray(bot?.providers_order))}" />
+            <p style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.25rem;">Forces OpenRouter to use specifically these providers in this order if available.</p>
           </div>
         </div>
 
@@ -713,6 +727,7 @@ export async function render(container, botId) {
       frequency_penalty: parseFloat(document.getElementById('bot-fp').value),
       auto_start: document.getElementById('bot-autostart').checked,
       allowed_guilds: JSON.stringify(document.getElementById('bot-allowed-guilds').value.split(',').map(s => s.trim()).filter(s => s)),
+      providers_order: JSON.stringify(document.getElementById('bot-providers-order').value.split(',').map(s => s.trim()).filter(s => s)),
     };
 
     const token = document.getElementById('bot-token').value.trim();

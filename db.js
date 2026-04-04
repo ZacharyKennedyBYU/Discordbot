@@ -170,6 +170,7 @@ function _initTables() {
             frequency_penalty REAL DEFAULT 0.0,
             auto_start INTEGER DEFAULT 0,
             allowed_guilds TEXT DEFAULT '[]',
+            providers_order TEXT DEFAULT '[]',
             created_at TEXT DEFAULT (datetime('now')),
             FOREIGN KEY (provider_id) REFERENCES providers(id) ON DELETE SET NULL
         );
@@ -248,6 +249,11 @@ function _initTables() {
     }
     try {
         db.exec('ALTER TABLE bots ADD COLUMN allowed_guilds TEXT DEFAULT "[]"');
+    } catch (_) {
+        // Column already exists — ignore
+    }
+    try {
+        db.exec('ALTER TABLE bots ADD COLUMN providers_order TEXT DEFAULT "[]"');
     } catch (_) {
         // Column already exists — ignore
     }

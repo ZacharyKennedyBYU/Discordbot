@@ -440,7 +440,7 @@ class BotManager {
             }
 
             // Call the AI API
-            const response = await openai.chat.completions.create({
+            const apiParams = {
                 model: config.model,
                 messages: messages,
                 temperature: config.temperature,
@@ -448,7 +448,24 @@ class BotManager {
                 max_tokens: config.max_tokens,
                 presence_penalty: config.presence_penalty,
                 frequency_penalty: config.frequency_penalty,
-            });
+            };
+
+            // Inject Custom Provider Order via extra_body (OpenRouter format)
+            let providersOrder = [];
+            try {
+                if (config.providers_order) providersOrder = JSON.parse(config.providers_order);
+            } catch (_) {}
+            
+            if (providersOrder && providersOrder.length > 0) {
+                apiParams.extra_body = {
+                    provider: {
+                        order: providersOrder,
+                        allow_fallbacks: false
+                    }
+                };
+            }
+
+            const response = await openai.chat.completions.create(apiParams);
 
             let replyContent = response.choices[0].message.content;
 
