@@ -182,6 +182,14 @@ class BotManager {
         // Ignore bot messages
         if (message.author.bot) return;
 
+        // URL Embed loading hack (give Discord 1.5s to generate the embed if it's a link)
+        if (message.content.includes('http') && message.embeds.length === 0) {
+            await new Promise(r => setTimeout(r, 1500));
+            try {
+                message = await message.channel.messages.fetch(message.id);
+            } catch(e) {}
+        }
+
         const isDM = message.channel.isDMBased();
 
         // ── ALLOWLIST LOGIC ──
@@ -295,15 +303,35 @@ class BotManager {
 
         // Gather image attachments (up to 3)
         const imagesToProcess = [];
+        let embedTextContext = [];
+
+        const processEmbed = (embed) => {
+            if (embed.image?.url) imagesToProcess.push(embed.image.url);
+            if (embed.thumbnail?.url) imagesToProcess.push(embed.thumbnail.url);
+            
+            let embedText = [];
+            if (embed.title) embedText.push(`Title: ${embed.title}`);
+            if (embed.description) embedText.push(`Description: ${embed.description}`);
+            if (embed.fields && embed.fields.length > 0) {
+                embed.fields.forEach(f => embedText.push(`${f.name}: ${f.value}`));
+            }
+            if (embed.author?.name) embedText.push(`Author: ${embed.author.name}`);
+            
+            if (embedText.length > 0) {
+                embedTextContext.push(`[Embed Content: ${embedText.join(' | ')}]`);
+            }
+        };
         
         message.attachments.forEach(att => {
             if (att.contentType && att.contentType.startsWith('image/')) imagesToProcess.push(att.url);
         });
+        message.embeds.forEach(processEmbed);
         
         if (repliedMessage) {
             repliedMessage.attachments.forEach(att => {
                 if (att.contentType && att.contentType.startsWith('image/')) imagesToProcess.push(att.url);
             });
+            repliedMessage.embeds.forEach(processEmbed);
         }
         const images = imagesToProcess.slice(0, 3);
 
@@ -361,6 +389,10 @@ class BotManager {
         
         if (imageDescriptions.length > 0) {
             contextPrefix += imageDescriptions.join('\n') + '\n\n';
+        }
+        
+        if (embedTextContext.length > 0) {
+            contextPrefix += embedTextContext.join('\n') + '\n\n';
         }
         
         if (contextPrefix) {
