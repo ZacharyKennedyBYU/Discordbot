@@ -559,7 +559,7 @@ class BotManager {
         // 1a. Ambient channel context: fetch recent Discord messages for awareness
         //     These are NOT saved — they're ephemeral background context
         const allStoredMessages = db.prepare(
-            'SELECT role, content FROM messages WHERE bot_id = ? AND channel_id = ? ORDER BY created_at ASC'
+            'SELECT id, role, content, created_at FROM messages WHERE bot_id = ? AND channel_id = ? ORDER BY created_at ASC'
         ).all(botId, channelId);
 
         // 1b. Cross-bot awareness: if the user mentions another bot by name,
@@ -596,10 +596,6 @@ class BotManager {
             return messages;
         }
 
-        if (allStoredMessages.length === 0) {
-            return messages;
-        }
-
         // 3. Token budget calculation
         const totalBudget = (config.max_prompt_tokens || 10000);
         let reservedTokens = 50; // Start with a 50 token safety margin
@@ -618,42 +614,75 @@ class BotManager {
         reservedTokens += 350;
 
         let availableBudget = totalBudget - reservedTokens;
-
         if (availableBudget < 200) availableBudget = 200; // minimum
+        
+        let totalStoredTokens = 0;
+        for (const m of allStoredMessages) totalStoredTokens += this._estimateTokens(m.content);
 
-        // 4. Walk messages newest→oldest, accumulate until budget is spent
+        // 4. Determine context to keep vs summarize
         const recentMessages = [];
-        let recentTokens = 0;
-        let cutoffIndex = allStoredMessages.length; // everything is "recent" by default
+        let cutoffIndex = 0;
 
-        for (let i = allStoredMessages.length - 1; i >= 0; i--) {
-            const msg = allStoredMessages[i];
-            const msgTokens = this._estimateTokens(msg.content);
-            if (recentTokens + msgTokens > availableBudget) {
-                cutoffIndex = i + 1; // messages 0..i are "old"
-                break;
+        if (totalStoredTokens > availableBudget && allStoredMessages.length > 1) {
+            // Buffer creation: target ~50% of available budget to leave room for future messages
+            const targetBudget = availableBudget * 0.5;
+            let recentTokens = 0;
+            
+            for (let i = allStoredMessages.length - 1; i >= 0; i--) {
+                const msg = allStoredMessages[i];
+                const msgTokens = this._estimateTokens(msg.content);
+                
+                // Always preserve the very latest message (the user's prompt) so they don't lose context for this turn
+                // Otherwise, stop when adding the next message would exceed our buffered target
+                if (i !== allStoredMessages.length - 1 && recentTokens + msgTokens > targetBudget) {
+                    cutoffIndex = i + 1;
+                    break;
+                }
+                
+                recentTokens += msgTokens;
+                recentMessages.unshift({ role: msg.role, content: msg.content });
             }
-            recentTokens += msgTokens;
-            recentMessages.unshift({ role: msg.role, content: msg.content });
-            cutoffIndex = i;
+        } else {
+            // Fits entirely in budget
+            for (const msg of allStoredMessages) {
+                recentMessages.push({ role: msg.role, content: msg.content });
+            }
         }
 
-        // 5. If there are older messages that didn't fit, summarize them
+        // 5. If there are older messages that didn't fit, summarize them and save to DB
         if (cutoffIndex > 0) {
             const oldMessages = allStoredMessages.slice(0, cutoffIndex);
-            // Reserve ~25% of the budget for the summary
             const summaryMaxTokens = Math.min(300, Math.floor(availableBudget * 0.25));
 
             try {
                 const summary = await this._summarizeMessages(oldMessages, openai, config.model, summaryMaxTokens);
                 if (summary) {
+                    const summaryContent = `[Previous conversation summary]\n${summary}`;
+                    
                     messages.push({
                         role: "system",
-                        content: `[Previous conversation summary]\n${summary}`
+                        content: summaryContent
                     });
+                    
+                    // Permanent buffer swap in DB: delete summarized messages, insert the new summary
+                    const oldIds = oldMessages.map(m => m.id);
+                    if (oldIds.length > 0) {
+                        try {
+                            const placeholders = oldIds.map(() => '?').join(',');
+                            db.prepare(`DELETE FROM messages WHERE id IN (${placeholders})`).run(...oldIds);
+                            
+                            // Insert new summary using the timestamp of the last summarized message so it stays in order
+                            const lastOldMsg = oldMessages[oldMessages.length - 1];
+                            db.prepare('INSERT INTO messages (bot_id, channel_id, guild_id, role, content, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+                                .run(botId, channelId, discordMessage?.guild?.id || '', 'system', summaryContent, lastOldMsg.created_at);
+                        } catch (dbErr) {
+                            console.error('[CordBridge] Failed to save summary to DB:', dbErr.message);
+                        }
+                    }
                 }
             } catch (err) {
                 console.error('[CordBridge] Summary generation failed, skipping older context:', err.message);
+                // If summary fails, we skip older context this turn. It will try again next turn.
             }
         }
 
