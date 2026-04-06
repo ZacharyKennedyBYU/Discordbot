@@ -150,7 +150,7 @@ app.get('/api/providers/:id/models', async (req, res) => {
 app.get('/api/bots', (req, res) => {
     const db = getDb();
     const bots = db.prepare(`
-        SELECT b.id, b.name, b.model, b.provider_id, b.use_chat_vision, b.auto_start, b.created_at,
+        SELECT b.id, b.name, b.model, b.provider_id, b.use_chat_vision, b.auto_start, b.log_retention_days, b.created_at,
                p.name as provider_name
         FROM bots b
         LEFT JOIN providers p ON b.provider_id = p.id
@@ -186,15 +186,15 @@ app.get('/api/bots/:id', (req, res) => {
 // POST create a bot
 app.post('/api/bots', (req, res) => {
     const { name, discord_token, bot_type, false_phrases, provider_id, vision_provider_id, model, vision_model, use_chat_vision, system_prompt, character_prompt, first_message, example_messages, prefill,
-        temperature, top_p, max_tokens, max_prompt_tokens, presence_penalty, frequency_penalty, auto_start, allowed_guilds, providers_order } = req.body;
+        temperature, top_p, max_tokens, max_prompt_tokens, presence_penalty, frequency_penalty, auto_start, allowed_guilds, providers_order, log_retention_days } = req.body;
 
     if (!name || !discord_token) return res.status(400).json({ error: 'name and discord_token are required.' });
 
     const db = getDb();
     const result = db.prepare(`
         INSERT INTO bots (name, discord_token, bot_type, false_phrases, provider_id, vision_provider_id, model, vision_model, use_chat_vision, system_prompt, character_prompt, first_message, example_messages, prefill,
-            temperature, top_p, max_tokens, max_prompt_tokens, presence_penalty, frequency_penalty, auto_start, allowed_guilds, providers_order)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            temperature, top_p, max_tokens, max_prompt_tokens, presence_penalty, frequency_penalty, auto_start, allowed_guilds, providers_order, log_retention_days)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
         name,
         discord_token,
@@ -218,7 +218,8 @@ app.post('/api/bots', (req, res) => {
         frequency_penalty ?? 0.0,
         auto_start ? 1 : 0,
         allowed_guilds || '[]',
-        providers_order || '[]'
+        providers_order || '[]',
+        log_retention_days !== undefined ? log_retention_days : 7
     );
     res.json({ id: result.lastInsertRowid, name });
 });
@@ -230,7 +231,7 @@ app.put('/api/bots/:id', (req, res) => {
     if (!existing) return res.status(404).json({ error: 'Bot not found' });
 
     const fields = ['name', 'discord_token', 'bot_type', 'false_phrases', 'provider_id', 'vision_provider_id', 'model', 'vision_model', 'use_chat_vision', 'system_prompt', 'character_prompt',
-        'first_message', 'example_messages', 'prefill', 'temperature', 'top_p', 'max_tokens', 'max_prompt_tokens', 'presence_penalty', 'frequency_penalty', 'auto_start', 'allowed_guilds', 'providers_order'];
+        'first_message', 'example_messages', 'prefill', 'temperature', 'top_p', 'max_tokens', 'max_prompt_tokens', 'presence_penalty', 'frequency_penalty', 'auto_start', 'allowed_guilds', 'providers_order', 'log_retention_days'];
 
     const updates = {};
     for (const field of fields) {
@@ -243,13 +244,13 @@ app.put('/api/bots/:id', (req, res) => {
 
     db.prepare(`
         UPDATE bots SET name=?, discord_token=?, bot_type=?, false_phrases=?, provider_id=?, vision_provider_id=?, model=?, vision_model=?, use_chat_vision=?, system_prompt=?, character_prompt=?,
-            first_message=?, example_messages=?, prefill=?, temperature=?, top_p=?, max_tokens=?, max_prompt_tokens=?, presence_penalty=?, frequency_penalty=?, auto_start=?, allowed_guilds=?, providers_order=?
+            first_message=?, example_messages=?, prefill=?, temperature=?, top_p=?, max_tokens=?, max_prompt_tokens=?, presence_penalty=?, frequency_penalty=?, auto_start=?, allowed_guilds=?, providers_order=?, log_retention_days=?
         WHERE id = ?
     `).run(
         updates.name, updates.discord_token, updates.bot_type, updates.false_phrases, updates.provider_id, updates.vision_provider_id, updates.model, updates.vision_model, updates.use_chat_vision,
         updates.system_prompt, updates.character_prompt, updates.first_message, updates.example_messages, updates.prefill,
         updates.temperature, updates.top_p, updates.max_tokens, updates.max_prompt_tokens,
-        updates.presence_penalty, updates.frequency_penalty, updates.auto_start, updates.allowed_guilds, updates.providers_order,
+        updates.presence_penalty, updates.frequency_penalty, updates.auto_start, updates.allowed_guilds, updates.providers_order, updates.log_retention_days,
         req.params.id
     );
 
@@ -326,6 +327,49 @@ app.delete('/api/bots/:id/history', (req, res) => {
         console.log(`[CordBridge] Cleared ALL history for bot id=${req.params.id} (${result.changes} messages removed)`);
     }
     res.json({ success: true, messagesRemoved: result.changes });
+});
+
+// GET list servers a bot has logs in
+app.get('/api/bots/:id/log_servers', (req, res) => {
+    const db = getDb();
+    const existing = db.prepare('SELECT * FROM bots WHERE id = ?').get(req.params.id);
+    if (!existing) return res.status(404).json({ error: 'Bot not found' });
+
+    const servers = db.prepare(`
+        SELECT DISTINCT guild_id
+        FROM bot_logs WHERE bot_id = ?
+        ORDER BY guild_id ASC
+    `).all(req.params.id);
+
+    res.json(servers);
+});
+
+// GET logs for a specific bot and server
+app.get('/api/bots/:id/logs', (req, res) => {
+    const db = getDb();
+    const existing = db.prepare('SELECT * FROM bots WHERE id = ?').get(req.params.id);
+    if (!existing) return res.status(404).json({ error: 'Bot not found' });
+
+    const guildId = req.query.guild_id || 'DM';
+
+    const logs = db.prepare(`
+        SELECT id, type, content, created_at
+        FROM bot_logs 
+        WHERE bot_id = ? AND guild_id = ?
+        ORDER BY id DESC
+        LIMIT 100
+    `).all(req.params.id, guildId);
+
+    // Parse the JSON content before submitting
+    const parsedLogs = logs.map(log => {
+        try {
+            return { ...log, content: JSON.parse(log.content) };
+        } catch(e) {
+            return log;
+        }
+    });
+
+    res.json(parsedLogs);
 });
 
 // ─────────────────────────────────────────────

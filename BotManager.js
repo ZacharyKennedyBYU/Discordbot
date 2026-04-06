@@ -497,7 +497,24 @@ class BotManager {
                 };
             }
 
+            // --- LOG REQUEST ---
+            // Create a copy without large image URLs to save DB space
+            const sanitizedParams = JSON.parse(JSON.stringify(apiParams));
+            sanitizedParams.messages = sanitizedParams.messages.map(m => {
+                if (Array.isArray(m.content)) {
+                    return { ...m, content: m.content.map(c => c.type === 'image_url' ? { type: 'image_url', image_url: { url: '[IMAGE DATA REMOVED FOR LOGS]' } } : c) };
+                }
+                return m;
+            });
+            this._saveLog(botId, guildId, 'api_request', sanitizedParams, config);
+
             const response = await openai.chat.completions.create(apiParams);
+
+            // --- LOG RESPONSE ---
+            this._saveLog(botId, guildId, 'api_response', {
+                choices: response.choices,
+                usage: response.usage
+            }, config);
 
             let replyContent = response.choices[0].message.content;
 
@@ -548,6 +565,27 @@ class BotManager {
     }
 
     /**
+     * Save a log entry for debugging and delete older logs if retention policy applies.
+     */
+    _saveLog(botId, guildId, type, contentObj, config) {
+        try {
+            const db = getDb();
+            const retentionDays = config && config.log_retention_days !== undefined ? config.log_retention_days : 7;
+            
+            // Cleanup older logs (skip if 0 means keep forever)
+            if (retentionDays > 0) {
+                db.prepare(`DELETE FROM bot_logs WHERE bot_id = ? AND created_at < datetime('now', '-${retentionDays} days')`).run(botId);
+            }
+
+            const contentStr = JSON.stringify(contentObj);
+            db.prepare('INSERT INTO bot_logs (bot_id, guild_id, type, content) VALUES (?, ?, ?, ?)')
+                .run(botId, guildId || 'DM', type, contentStr);
+        } catch (err) {
+            console.error('[CordBridge] Failed to save log:', err.message);
+        }
+    }
+
+    /**
      * Build the message context array from stored history.
      * Fits as many recent messages as the token budget allows,
      * and summarizes older overflow messages via an AI call.
@@ -555,12 +593,20 @@ class BotManager {
     async _buildContext(botId, channelId, config, openai, userText = '', discordMessage = null) {
         const db = getDb();
         const messages = [];
+        const guildId = discordMessage?.guild?.id || 'DM';
 
         // 1a. Ambient channel context: fetch recent Discord messages for awareness
         //     These are NOT saved — they're ephemeral background context
-        const allStoredMessages = db.prepare(
-            'SELECT id, role, content, created_at FROM messages WHERE bot_id = ? AND channel_id = ? ORDER BY created_at ASC'
-        ).all(botId, channelId);
+        let allStoredMessages;
+        if (guildId === 'DM') {
+            allStoredMessages = db.prepare(
+                'SELECT id, role, content, created_at FROM messages WHERE bot_id = ? AND channel_id = ? ORDER BY created_at ASC'
+            ).all(botId, channelId);
+        } else {
+            allStoredMessages = db.prepare(
+                'SELECT id, role, content, created_at FROM messages WHERE bot_id = ? AND guild_id = ? ORDER BY created_at ASC'
+            ).all(botId, guildId);
+        }
 
         // 1b. Cross-bot awareness: if the user mentions another bot by name,
         //     inject that bot's character prompt so this bot knows about them
@@ -695,6 +741,16 @@ class BotManager {
         if (channelContext) {
             messages.push({ role: "system", content: channelContext });
         }
+
+        let totalTks = 0;
+        messages.forEach(m => totalTks += this._estimateTokens(typeof m.content === 'string' ? m.content : JSON.stringify(m.content)));
+        
+        this._saveLog(botId, guildId, 'context_built', {
+            channelId,
+            totalTokens: totalTks,
+            messageCount: messages.length,
+            messagesIncluded: messages.map(m => m.role)
+        }, config);
 
         return messages;
     }

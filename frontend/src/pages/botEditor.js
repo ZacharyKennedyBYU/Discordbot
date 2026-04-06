@@ -228,11 +228,13 @@ export async function render(container, botId) {
           </ul>
         </div>
 
-        <!-- Auto-start -->
+        <!-- Admin & Auto-start -->
         <div class="card" style="margin-bottom: 1.5rem;">
-          <div style="display: flex; align-items: center; justify-content: space-between;">
+          <h3 style="margin-bottom: 1rem;">Admin & Settings</h3>
+          
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border);">
             <div>
-              <h3>Auto-Start</h3>
+              <p style="font-weight: bold; margin: 0;">Auto-Start</p>
               <p style="font-size: 0.85rem; color: var(--text-secondary); margin-top: 0.25rem;">Automatically start this bot when CordBridge launches.</p>
             </div>
             <label class="toggle">
@@ -240,11 +242,20 @@ export async function render(container, botId) {
               <span class="toggle-slider"></span>
             </label>
           </div>
+
+          <div style="display: flex; align-items: center; justify-content: space-between;">
+            <div>
+              <p style="font-weight: bold; margin: 0;">Log Retention (Days)</p>
+              <p style="font-size: 0.85rem; color: var(--text-secondary); margin-top: 0.25rem;">Detailed debugging logs are kept this many days. Set to 0 to keep forever.</p>
+            </div>
+            <input class="form-input" id="bot-log-retention" type="number" min="0" value="${bot?.log_retention_days ?? 7}" style="max-width: 80px;" />
+          </div>
         </div>
 
         <!-- Actions -->
         <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;">
           <div style="display: flex; gap: 0.75rem;">
+            ${!isNew ? `<button type="button" class="btn btn-ghost" id="view-logs-btn">📋 View Logs</button>` : ''}
             ${!isNew ? `<button type="button" class="btn btn-ghost" id="clear-history-btn">🧹 Clear History</button>` : ''}
             ${!isNew ? `<button type="button" class="btn btn-danger" id="delete-btn">🗑 Delete Bot</button>` : ''}
           </div>
@@ -634,10 +645,45 @@ export async function render(container, botId) {
   document.getElementById('back-btn').addEventListener('click', () => { window.location.hash = '#/'; });
   document.getElementById('cancel-btn').addEventListener('click', () => { window.location.hash = '#/'; });
 
-  // ── Clear History ──
-  const clearHistoryBtn = document.getElementById('clear-history-btn');
-  if (clearHistoryBtn) {
-    clearHistoryBtn.addEventListener('click', async () => {
+  // ── Modals & Dialogs ──
+  if (!isNew) {
+    const dialogsContainer = document.createElement('div');
+    container.appendChild(dialogsContainer);
+    dialogsContainer.innerHTML = `
+      <dialog id="clear-history-dialog" class="card" style="padding: 1.5rem; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); max-width: 400px; width: 90%; margin: auto; color: var(--text);">
+        <h3 style="margin-top: 0; margin-bottom: 0.5rem;">Clear Conversation History</h3>
+        <p style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 1rem;">Select a server to clear memory from.</p>
+        <select id="clear-history-select" class="form-select" style="margin-bottom: 1.5rem;"></select>
+        <div style="display: flex; justify-content: flex-end; gap: 0.5rem;">
+          <button type="button" class="btn btn-ghost" onclick="document.getElementById('clear-history-dialog').close()">Cancel</button>
+          <button type="button" class="btn btn-danger" id="confirm-clear-history-btn">Clear</button>
+        </div>
+      </dialog>
+
+      <dialog id="view-logs-dialog" style="padding: 1.5rem; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); width: 90%; max-width: 800px; height: 80vh; margin: auto; color: var(--text); box-shadow: 0 4px 12px rgba(0,0,0,0.5);">
+        <div style="display: flex; flex-direction: column; height: 100%;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+            <h3 style="margin: 0;">Bot Debug Logs</h3>
+            <button type="button" class="btn btn-ghost" onclick="document.getElementById('view-logs-dialog').close()">✖</button>
+          </div>
+          <div style="display: flex; gap: 0.5rem; margin-bottom: 1rem;">
+            <select id="view-logs-select" class="form-select" style="flex: 1;">
+              <option value="">— Select a Server —</option>
+            </select>
+            <button type="button" class="btn btn-primary" id="refresh-logs-btn">Refresh</button>
+          </div>
+          <div id="logs-container" style="flex: 1; overflow-y: auto; background: var(--bg-alt); padding: 1rem; border-radius: var(--radius); border: 1px solid var(--border); font-family: monospace; font-size: 0.85rem; white-space: pre-wrap; word-break: break-word;">
+            Select a server to view logs...
+          </div>
+        </div>
+      </dialog>
+    `;
+
+    // ── Clear History Logic ──
+    const clearHistoryDialog = document.getElementById('clear-history-dialog');
+    const clearHistorySelect = document.getElementById('clear-history-select');
+    
+    document.getElementById('clear-history-btn').addEventListener('click', async () => {
       try {
         const servers = await bots.getHistory(bot.id);
         if (!servers || servers.length === 0) {
@@ -645,42 +691,99 @@ export async function render(container, botId) {
           return;
         }
 
-        // Build options list
-        const options = servers.map(s => {
-          const label = s.guild_id === 'DM' || !s.guild_id ? 'Direct Messages' : `Server ${s.guild_id}`;
-          return `  • ${label} (${s.message_count} messages)`;
-        }).join('\n');
+        clearHistorySelect.innerHTML = `<option value="all">🧹 Everything (All Servers & DMs)</option>` + 
+          servers.map(s => {
+            const label = s.guild_id === 'DM' || !s.guild_id ? 'Direct Messages' : `Server ${s.guild_id}`;
+            return `<option value="${s.guild_id}">${label} (${s.message_count} messages)</option>`;
+          }).join('');
 
-        const choice = prompt(
-          `Conversation history for "${bot.name}":\n\n${options}\n\n` +
-          `Enter a server ID to clear just that server,\nor type "all" to clear everything:`
-        );
-
-        if (choice === null) return; // cancelled
-
-        const trimmed = choice.trim();
-        if (!trimmed) return;
-
-        let result;
-        if (trimmed.toLowerCase() === 'all') {
-          if (!confirm(`Clear ALL conversation history for "${bot.name}" across all servers?`)) return;
-          result = await bots.clearHistory(bot.id);
-        } else {
-          // Match against guild IDs (or "DM")
-          const matchedServer = servers.find(s =>
-            s.guild_id === trimmed || (trimmed.toLowerCase() === 'dm' && (!s.guild_id || s.guild_id === 'DM'))
-          );
-          if (!matchedServer) {
-            toast('Server ID not found in history', 'error');
-            return;
-          }
-          result = await bots.clearHistory(bot.id, matchedServer.guild_id);
-        }
-        toast(`History cleared (${result.messagesRemoved} messages removed)`, 'success');
+        clearHistoryDialog.showModal();
       } catch (err) {
         toast(err.message, 'error');
       }
     });
+
+    document.getElementById('confirm-clear-history-btn').addEventListener('click', async () => {
+      const choice = clearHistorySelect.value;
+      try {
+        let result;
+        if (choice === 'all') {
+          if (!confirm(`Clear ALL conversation history for "${bot.name}" across all servers?`)) return;
+          result = await bots.clearHistory(bot.id);
+        } else {
+          result = await bots.clearHistory(bot.id, choice);
+        }
+        toast(`History cleared (${result.messagesRemoved} messages removed)`, 'success');
+        clearHistoryDialog.close();
+      } catch (err) {
+        toast(err.message, 'error');
+      }
+    });
+
+    // ── View Logs Logic ──
+    const viewLogsDialog = document.getElementById('view-logs-dialog');
+    const viewLogsSelect = document.getElementById('view-logs-select');
+    const logsContainer = document.getElementById('logs-container');
+
+    const loadLogServers = async () => {
+      try {
+        const servers = await bots.getLogServers(bot.id);
+        viewLogsSelect.innerHTML = `<option value="">— Select a Server —</option>` + 
+          servers.map(s => {
+            const label = s.guild_id === 'DM' || !s.guild_id ? 'Direct Messages' : `Server ${s.guild_id}`;
+            return `<option value="${s.guild_id}">${label}</option>`;
+          }).join('');
+      } catch (err) {
+        toast('Failed to load log servers: ' + err.message, 'error');
+      }
+    };
+
+    const loadLogs = async () => {
+      const guildId = viewLogsSelect.value;
+      if (!guildId) {
+        logsContainer.innerHTML = 'Please select a server.';
+        return;
+      }
+      logsContainer.innerHTML = 'Loading logs...';
+      try {
+        const logs = await bots.getLogs(bot.id, guildId);
+        if (!logs || logs.length === 0) {
+          logsContainer.innerHTML = 'No logs found.';
+          return;
+        }
+        logsContainer.innerHTML = logs.map(l => {
+          const time = new Date(l.created_at + 'Z').toLocaleString();
+          let color = '#3b82f6';
+          if (l.type === 'error') color = '#ef4444';
+          else if (l.type === 'context_built') color = '#10b981';
+          
+          let formattedContent = '';
+          try {
+            formattedContent = JSON.stringify(l.content, null, 2);
+          } catch(e) {
+            formattedContent = escapeHtml(l.content);
+          }
+
+          return `
+<div style="margin-bottom: 1rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border-light);">
+  <strong style="color: ${color};">[${escapeHtml(l.type)}]</strong> 
+  <span style="color: var(--text-secondary);">${time}</span>
+  <pre style="margin-top: 0.5rem; margin-bottom: 0;">${escapeHtml(formattedContent)}</pre>
+</div>`;
+        }).join('');
+      } catch (err) {
+        logsContainer.innerHTML = `<span style="color:red;">Error loading logs: ${err.message}</span>`;
+      }
+    };
+
+    document.getElementById('view-logs-btn').addEventListener('click', async () => {
+      await loadLogServers();
+      logsContainer.innerHTML = 'Select a server to view logs...';
+      viewLogsDialog.showModal();
+    });
+
+    viewLogsSelect.addEventListener('change', loadLogs);
+    document.getElementById('refresh-logs-btn').addEventListener('click', loadLogs);
   }
 
   // ── Delete ──
@@ -726,6 +829,7 @@ export async function render(container, botId) {
       presence_penalty: parseFloat(document.getElementById('bot-pp').value),
       frequency_penalty: parseFloat(document.getElementById('bot-fp').value),
       auto_start: document.getElementById('bot-autostart').checked,
+      log_retention_days: parseInt(document.getElementById('bot-log-retention').value) ?? 7,
       allowed_guilds: JSON.stringify(document.getElementById('bot-allowed-guilds').value.split(',').map(s => s.trim()).filter(s => s)),
       providers_order: JSON.stringify(document.getElementById('bot-providers-order').value.split(',').map(s => s.trim()).filter(s => s)),
     };

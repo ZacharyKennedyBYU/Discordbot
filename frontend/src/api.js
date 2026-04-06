@@ -51,6 +51,8 @@ export const bots = {
   attachLorebook:  (id, lorebookId)  => request(`/bots/${id}/lorebooks`, { method: 'POST', body: JSON.stringify({ lorebook_id: lorebookId }) }),
   updateLorebook:  (id, lbId, overrides) => request(`/bots/${id}/lorebooks/${lbId}`, { method: 'PUT', body: JSON.stringify({ overrides }) }),
   detachLorebook:  (id, lbId)        => request(`/bots/${id}/lorebooks/${lbId}`, { method: 'DELETE' }),
+  getLogServers:   (id)              => request(`/bots/${id}/log_servers`),
+  getLogs:         (id, guildId)     => request(`/bots/${id}/logs${guildId ? `?guild_id=${guildId}` : ''}`),
 };
 
 // ── Lorebooks ──

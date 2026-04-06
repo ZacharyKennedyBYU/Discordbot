@@ -171,6 +171,7 @@ function _initTables() {
             auto_start INTEGER DEFAULT 0,
             allowed_guilds TEXT DEFAULT '[]',
             providers_order TEXT DEFAULT '[]',
+            log_retention_days INTEGER DEFAULT 7,
             created_at TEXT DEFAULT (datetime('now')),
             FOREIGN KEY (provider_id) REFERENCES providers(id) ON DELETE SET NULL
         );
@@ -203,6 +204,16 @@ function _initTables() {
             PRIMARY KEY (bot_id, lorebook_id),
             FOREIGN KEY (bot_id) REFERENCES bots(id) ON DELETE CASCADE,
             FOREIGN KEY (lorebook_id) REFERENCES lorebooks(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS bot_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bot_id INTEGER NOT NULL,
+            guild_id TEXT DEFAULT 'DM',
+            type TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (bot_id) REFERENCES bots(id) ON DELETE CASCADE
         );
     `);
 
@@ -254,6 +265,11 @@ function _initTables() {
     }
     try {
         db.exec('ALTER TABLE bots ADD COLUMN providers_order TEXT DEFAULT "[]"');
+    } catch (_) {
+        // Column already exists — ignore
+    }
+    try {
+        db.exec('ALTER TABLE bots ADD COLUMN log_retention_days INTEGER DEFAULT 7');
     } catch (_) {
         // Column already exists — ignore
     }
