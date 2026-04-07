@@ -698,7 +698,7 @@ class BotManager {
         // 5. If there are older messages that didn't fit, summarize them and save to DB
         if (cutoffIndex > 0) {
             const oldMessages = allStoredMessages.slice(0, cutoffIndex);
-            const summaryMaxTokens = Math.min(300, Math.floor(availableBudget * 0.25));
+            const summaryMaxTokens = Math.min(1500, Math.floor(availableBudget * 0.3));
 
             try {
                 const summary = await this._summarizeMessages(oldMessages, openai, config.model, summaryMaxTokens);
