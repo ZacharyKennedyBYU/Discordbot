@@ -1,128 +1,27 @@
-const initSqlJs = require('sql.js');
-const fs = require('fs');
+const { DatabaseSync } = require('node:sqlite');
 const path = require('path');
 
 const DB_PATH = path.join(__dirname, 'database.sqlite');
 
 let db = null;
-let SQL = null;
 
 /**
- * Thin wrapper around sql.js that mimics the better-sqlite3 API
- * so that server.js and BotManager.js don't need any changes.
+ * Initialize the database connection and create tables if needed.
+ * Uses Node.js built-in node:sqlite (on-disk SQLite) — no in-memory copies,
+ * no manual _save() calls, dramatically lower RAM usage vs sql.js.
  */
-class Statement {
-    constructor(database, sql) {
-        this._db = database;
-        this._sql = sql;
-    }
-
-    /** Run a query that returns rows (SELECT). Returns all matching rows. */
-    all(...params) {
-        try {
-            const stmt = this._db.prepare(this._sql);
-            if (params.length) stmt.bind(params);
-            const rows = [];
-            while (stmt.step()) {
-                rows.push(stmt.getAsObject());
-            }
-            stmt.free();
-            return rows;
-        } catch (err) {
-            console.error('[DB] Error in .all():', err.message, '| SQL:', this._sql);
-            throw err;
-        }
-    }
-
-    /** Run a query that returns a single row. Returns the row or undefined. */
-    get(...params) {
-        try {
-            const stmt = this._db.prepare(this._sql);
-            if (params.length) stmt.bind(params);
-            let row = undefined;
-            if (stmt.step()) {
-                row = stmt.getAsObject();
-            }
-            stmt.free();
-            return row;
-        } catch (err) {
-            console.error('[DB] Error in .get():', err.message, '| SQL:', this._sql);
-            throw err;
-        }
-    }
-
-    /** Run a query that modifies data (INSERT/UPDATE/DELETE). Returns { changes, lastInsertRowid }. */
-    run(...params) {
-        try {
-            const stmt = this._db.prepare(this._sql);
-            if (params.length) stmt.bind(params);
-            stmt.step();
-            stmt.free();
-            // Persist to disk after every write
-            const changes = this._db.getRowsModified();
-            const lastId = this._db.exec("SELECT last_insert_rowid() as id");
-            const lastInsertRowid = lastId.length > 0 ? lastId[0].values[0][0] : 0;
-            _save();
-            return { changes, lastInsertRowid };
-        } catch (err) {
-            console.error('[DB] Error in .run():', err.message, '| SQL:', this._sql);
-            throw err;
-        }
-    }
-}
-
-class DatabaseWrapper {
-    constructor(sqlDb) {
-        this._db = sqlDb;
-    }
-
-    prepare(sql) {
-        return new Statement(this._db, sql);
-    }
-
-    exec(sql) {
-        this._db.run(sql);
-        _save();
-    }
-
-    pragma(pragmaStr) {
-        try {
-            this._db.run(`PRAGMA ${pragmaStr}`);
-        } catch (_) {
-            // Some pragmas (like WAL) aren't supported in sql.js, silently skip
-        }
-    }
-}
-
-/** Save the in-memory database to disk */
-function _save() {
-    if (!db) return;
-    try {
-        const data = db._db.export();
-        const buffer = Buffer.from(data);
-        fs.writeFileSync(DB_PATH, buffer);
-    } catch (err) {
-        console.error('[DB] Error saving database:', err.message);
-    }
-}
-
-/** Initialize sql.js and load/create the database */
 async function initDb() {
     if (db) return db;
 
-    SQL = await initSqlJs();
+    db = new DatabaseSync(DB_PATH);
 
-    // Load existing database from disk, or create a new one
-    if (fs.existsSync(DB_PATH)) {
-        const fileBuffer = fs.readFileSync(DB_PATH);
-        db = new DatabaseWrapper(new SQL.Database(fileBuffer));
-        console.log('[DB] Loaded existing database from disk.');
-    } else {
-        db = new DatabaseWrapper(new SQL.Database());
-        console.log('[DB] Created new database.');
-    }
+    // Enable WAL mode for better concurrent read/write performance
+    // (especially helpful on Pi SD cards — fewer fsync calls)
+    db.exec('PRAGMA journal_mode = WAL');
+    db.exec('PRAGMA foreign_keys = ON');
 
-    db.pragma('foreign_keys = ON');
+    console.log('[DB] Opened database (node:sqlite, WAL mode).');
+
     _initTables();
 
     return db;
@@ -217,62 +116,29 @@ function _initTables() {
         );
     `);
 
-    // Migration: add first_message column to existing databases
-    try {
-        db.exec('ALTER TABLE bots ADD COLUMN first_message TEXT DEFAULT ""');
-    } catch (_) {
-        // Column already exists — ignore
+    // Migration: add columns to existing databases (safe to run repeatedly)
+    const migrations = [
+        'ALTER TABLE bots ADD COLUMN first_message TEXT DEFAULT ""',
+        'ALTER TABLE bots ADD COLUMN example_messages TEXT DEFAULT ""',
+        'ALTER TABLE messages ADD COLUMN guild_id TEXT DEFAULT ""',
+        'ALTER TABLE bots ADD COLUMN vision_model TEXT DEFAULT ""',
+        'ALTER TABLE bots ADD COLUMN vision_provider_id INTEGER',
+        'ALTER TABLE bots ADD COLUMN bot_type TEXT DEFAULT "real"',
+        'ALTER TABLE bots ADD COLUMN false_phrases TEXT DEFAULT "[]"',
+        'ALTER TABLE bots ADD COLUMN use_chat_vision INTEGER DEFAULT 0',
+        'ALTER TABLE bots ADD COLUMN allowed_guilds TEXT DEFAULT "[]"',
+        'ALTER TABLE bots ADD COLUMN providers_order TEXT DEFAULT "[]"',
+        'ALTER TABLE bots ADD COLUMN log_retention_days INTEGER DEFAULT 7',
+    ];
+
+    for (const sql of migrations) {
+        try { db.exec(sql); } catch (_) { /* Column already exists — ignore */ }
     }
+
+    // Add index for guild-based message queries (used by server-wide memory)
     try {
-        db.exec('ALTER TABLE bots ADD COLUMN example_messages TEXT DEFAULT ""');
-    } catch (_) {
-        // Column already exists — ignore
-    }
-    try {
-        db.exec('ALTER TABLE messages ADD COLUMN guild_id TEXT DEFAULT ""');
-    } catch (_) {
-        // Column already exists — ignore
-    }
-    try {
-        db.exec('ALTER TABLE bots ADD COLUMN vision_model TEXT DEFAULT ""');
-    } catch (_) {
-        // Column already exists — ignore
-    }
-    try {
-        db.exec('ALTER TABLE bots ADD COLUMN vision_provider_id INTEGER');
-    } catch (_) {
-        // Column already exists — ignore
-    }
-    try {
-        db.exec('ALTER TABLE bots ADD COLUMN bot_type TEXT DEFAULT "real"');
-    } catch (_) {
-        // Column already exists — ignore
-    }
-    try {
-        db.exec('ALTER TABLE bots ADD COLUMN false_phrases TEXT DEFAULT "[]"');
-    } catch (_) {
-        // Column already exists — ignore
-    }
-    try {
-        db.exec('ALTER TABLE bots ADD COLUMN use_chat_vision INTEGER DEFAULT 0');
-    } catch (_) {
-        // Column already exists — ignore
-    }
-    try {
-        db.exec('ALTER TABLE bots ADD COLUMN allowed_guilds TEXT DEFAULT "[]"');
-    } catch (_) {
-        // Column already exists — ignore
-    }
-    try {
-        db.exec('ALTER TABLE bots ADD COLUMN providers_order TEXT DEFAULT "[]"');
-    } catch (_) {
-        // Column already exists — ignore
-    }
-    try {
-        db.exec('ALTER TABLE bots ADD COLUMN log_retention_days INTEGER DEFAULT 7');
-    } catch (_) {
-        // Column already exists — ignore
-    }
+        db.exec('CREATE INDEX IF NOT EXISTS idx_messages_guild ON messages(bot_id, guild_id, created_at)');
+    } catch (_) { }
 }
 
 module.exports = { initDb, getDb };

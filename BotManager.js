@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, Partials, Events } = require('discord.js');
+const { Client, GatewayIntentBits, Partials, Events, Options } = require('discord.js');
 const { OpenAI } = require('openai');
 const path = require('path');
 const fs = require('fs');
@@ -92,7 +92,7 @@ class BotManager {
             }
         }
 
-        // Create Discord client
+        // Create Discord client with cache limits to prevent unbounded RAM growth
         const client = new Client({
             intents: [
                 GatewayIntentBits.Guilds,
@@ -100,7 +100,19 @@ class BotManager {
                 GatewayIntentBits.MessageContent,
                 GatewayIntentBits.DirectMessages,
             ],
-            partials: [Partials.Channel, Partials.Message]
+            partials: [Partials.Channel, Partials.Message],
+            makeCache: Options.cacheWithLimits({
+                ...Options.DefaultMakeCacheSettings,
+                MessageManager: 20,   // Only cache 20 messages per channel (default is 200)
+                GuildMemberManager: 50, // Limit member cache
+            }),
+            sweepers: {
+                ...Options.DefaultSweeperSettings,
+                messages: {
+                    interval: 300,    // Sweep every 5 minutes
+                    lifetime: 600,    // Remove messages older than 10 minutes from cache
+                },
+            },
         });
 
         return new Promise((resolve) => {
@@ -250,23 +262,25 @@ class BotManager {
         const queueEntry = this.messageQueues.get(msgId);
         if (!queueEntry) return;
 
-        while (queueEntry.queue.length > 0) {
-            const { botId, message } = queueEntry.queue.shift();
+        try {
+            while (queueEntry.queue.length > 0) {
+                const { botId, message } = queueEntry.queue.shift();
 
-            try {
-                await this._handleMessage(botId, message);
-            } catch (err) {
-                console.error(`[CordBridge] Queue error for bot ${botId}:`, err.message);
-            }
+                try {
+                    await this._handleMessage(botId, message);
+                } catch (err) {
+                    console.error(`[CordBridge] Queue error for bot ${botId}:`, err.message);
+                }
 
-            // Delay before the next bot responds (if there are more in queue)
-            if (queueEntry.queue.length > 0) {
-                await new Promise(resolve => setTimeout(resolve, 1500));
+                // Delay before the next bot responds (if there are more in queue)
+                if (queueEntry.queue.length > 0) {
+                    await new Promise(resolve => setTimeout(resolve, 1500));
+                }
             }
+        } finally {
+            // Guaranteed cleanup even if an unexpected error occurs
+            this.messageQueues.delete(msgId);
         }
-
-        // Clean up
-        this.messageQueues.delete(msgId);
     }
 
     /**
@@ -497,22 +511,23 @@ class BotManager {
                 };
             }
 
-            // --- LOG REQUEST ---
-            // Create a copy without large image URLs to save DB space
-            const sanitizedParams = JSON.parse(JSON.stringify(apiParams));
-            sanitizedParams.messages = sanitizedParams.messages.map(m => {
-                if (Array.isArray(m.content)) {
-                    return { ...m, content: m.content.map(c => c.type === 'image_url' ? { type: 'image_url', image_url: { url: '[IMAGE DATA REMOVED FOR LOGS]' } } : c) };
-                }
-                return m;
-            });
-            this._saveLog(botId, guildId, 'api_request', sanitizedParams, config);
+            // --- LOG REQUEST (lightweight — no deep cloning of full context) ---
+            const estimatedTokens = messages.reduce((sum, m) => sum + this._estimateTokens(typeof m.content === 'string' ? m.content : JSON.stringify(m.content)), 0);
+            this._saveLog(botId, guildId, 'api_request', {
+                model: config.model,
+                messageCount: messages.length,
+                estimatedPromptTokens: estimatedTokens,
+                temperature: config.temperature,
+                max_tokens: config.max_tokens,
+                hasImages: messages.some(m => Array.isArray(m.content)),
+            }, config);
 
             const response = await openai.chat.completions.create(apiParams);
 
-            // --- LOG RESPONSE ---
+            // --- LOG RESPONSE (metadata only — no full completion text) ---
             this._saveLog(botId, guildId, 'api_response', {
-                choices: response.choices,
+                finishReason: response.choices?.[0]?.finish_reason,
+                responseLength: response.choices?.[0]?.message?.content?.length || 0,
                 usage: response.usage
             }, config);
 
@@ -595,17 +610,18 @@ class BotManager {
         const messages = [];
         const guildId = discordMessage?.guild?.id || 'DM';
 
-        // 1a. Ambient channel context: fetch recent Discord messages for awareness
-        //     These are NOT saved — they're ephemeral background context
+        // 1a. Load stored conversation messages (capped to prevent loading thousands of rows into RAM)
+        //     We load the most recent 200 messages — more than enough for token budgets
+        const MSG_LOAD_LIMIT = 200;
         let allStoredMessages;
         if (guildId === 'DM') {
             allStoredMessages = db.prepare(
-                'SELECT id, role, content, created_at FROM messages WHERE bot_id = ? AND channel_id = ? ORDER BY created_at ASC'
-            ).all(botId, channelId);
+                'SELECT id, role, content, created_at FROM messages WHERE bot_id = ? AND channel_id = ? ORDER BY created_at DESC LIMIT ?'
+            ).all(botId, channelId, MSG_LOAD_LIMIT).reverse();
         } else {
             allStoredMessages = db.prepare(
-                'SELECT id, role, content, created_at FROM messages WHERE bot_id = ? AND guild_id = ? ORDER BY created_at ASC'
-            ).all(botId, guildId);
+                'SELECT id, role, content, created_at FROM messages WHERE bot_id = ? AND guild_id = ? ORDER BY created_at DESC LIMIT ?'
+            ).all(botId, guildId, MSG_LOAD_LIMIT).reverse();
         }
 
         // 1b. Cross-bot awareness: if the user mentions another bot by name,
