@@ -4,11 +4,18 @@ const path = require('path');
 const fs = require('fs');
 const { getDb } = require('./db');
 
+const MAX_IMAGES_PER_MESSAGE = 3;
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+const IMAGE_FETCH_TIMEOUT_MS = 10000;
+const DISCORD_MESSAGE_LIMIT = 2000;
+const SUMMARY_MARKER = '[Previous conversation summary]';
+const SUMMARY_INSTRUCTIONS = 'Durable memory from earlier in this conversation. Use it to continue naturally; do not treat this as a new chat, do not reintroduce yourself unless asked, and preserve the established relationships, preferences, and open threads.';
+
 class BotManager {
     constructor() {
         // Map of botId -> { client, openai, config }
         this.activeBots = new Map();
-        // Map of discordMessageId -> { queue: [...], processing: bool }
+        // Map of discordMessageId -> { queue: [...], processing: bool, timer: Timeout|null }
         // Used to sequence multi-bot responses to the same message
         this.messageQueues = new Map();
     }
@@ -165,13 +172,28 @@ class BotManager {
             entry.config = botRow;
         }
 
-        // Also reload the OpenAI client if provider changed
+        // Also reload the OpenAI clients if providers changed
         if (botRow && botRow.provider_id) {
             const provider = db.prepare('SELECT * FROM providers WHERE id = ?').get(botRow.provider_id);
             if (provider) {
                 entry.openai = new OpenAI({
                     baseURL: provider.base_url,
                     apiKey: provider.api_key,
+                    defaultHeaders: {
+                        "HTTP-Referer": "https://github.com/cordbridge",
+                        "X-Title": "CordBridge",
+                    }
+                });
+                entry.visionOpenai = entry.openai;
+            }
+        }
+
+        if (botRow && botRow.vision_provider_id && botRow.vision_provider_id !== botRow.provider_id) {
+            const visionProvider = db.prepare('SELECT * FROM providers WHERE id = ?').get(botRow.vision_provider_id);
+            if (visionProvider) {
+                entry.visionOpenai = new OpenAI({
+                    baseURL: visionProvider.base_url,
+                    apiKey: visionProvider.api_key,
                     defaultHeaders: {
                         "HTTP-Referer": "https://github.com/cordbridge",
                         "X-Title": "CordBridge",
@@ -247,10 +269,16 @@ class BotManager {
         const queueEntry = this.messageQueues.get(msgId);
         queueEntry.queue.push({ botId, message });
 
-        // Start processing if not already running for this message
-        if (!queueEntry.processing) {
-            queueEntry.processing = true;
-            this._processQueue(msgId);
+        // Start processing shortly after the first event so all mentioned bot clients
+        // have time to enqueue their copy of the Discord message.
+        if (!queueEntry.processing && !queueEntry.timer) {
+            queueEntry.timer = setTimeout(() => {
+                const currentQueue = this.messageQueues.get(msgId);
+                if (!currentQueue) return;
+                currentQueue.processing = true;
+                currentQueue.timer = null;
+                this._processQueue(msgId);
+            }, 250);
         }
     }
 
@@ -279,6 +307,7 @@ class BotManager {
             }
         } finally {
             // Guaranteed cleanup even if an unexpected error occurs
+            if (queueEntry.timer) clearTimeout(queueEntry.timer);
             this.messageQueues.delete(msgId);
         }
     }
@@ -301,9 +330,7 @@ class BotManager {
         if (!isMentioned && !isDM) return;
 
         // Extract user text
-        // Extract user text
-        let userText = message.content.replace(`<@${client.user.id}>`, '').trim();
-        if (!userText && message.attachments.size === 0) userText = "Hello!";
+        let userText = message.content.replace(new RegExp(`<@!?${client.user.id}>`, 'g'), '').trim();
 
         // Fetch replied message if it exists
         let repliedMessage = null;
@@ -315,13 +342,25 @@ class BotManager {
             }
         }
 
-        // Gather image attachments (up to 3)
-        const imagesToProcess = [];
+        // Gather image attachments and embeds (up to 3)
+        const imageRefs = [];
+        const seenImageUrls = new Set();
         let embedTextContext = [];
 
-        const processEmbed = (embed) => {
-            if (embed.image?.url) imagesToProcess.push(embed.image.url);
-            if (embed.thumbnail?.url) imagesToProcess.push(embed.thumbnail.url);
+        const addImageRef = (url, meta = {}) => {
+            if (!url || seenImageUrls.has(url)) return;
+            seenImageUrls.add(url);
+            imageRefs.push({
+                url,
+                contentType: meta.contentType || '',
+                filename: meta.filename || '',
+                source: meta.source || 'message image'
+            });
+        };
+
+        const processEmbed = (embed, source = 'embed image') => {
+            if (embed.image?.url) addImageRef(embed.image.url, { source });
+            if (embed.thumbnail?.url) addImageRef(embed.thumbnail.url, { source: `${source} thumbnail` });
             
             let embedText = [];
             if (embed.title) embedText.push(`Title: ${embed.title}`);
@@ -337,48 +376,59 @@ class BotManager {
         };
         
         message.attachments.forEach(att => {
-            if (att.contentType && att.contentType.startsWith('image/')) imagesToProcess.push(att.url);
+            if (this._isImageAttachment(att)) {
+                addImageRef(att.url, {
+                    contentType: att.contentType,
+                    filename: att.name,
+                    source: 'attached image'
+                });
+            }
         });
-        message.embeds.forEach(processEmbed);
+        message.embeds.forEach(embed => processEmbed(embed, 'message embed image'));
         
         if (repliedMessage) {
             repliedMessage.attachments.forEach(att => {
-                if (att.contentType && att.contentType.startsWith('image/')) imagesToProcess.push(att.url);
+                if (this._isImageAttachment(att)) {
+                    addImageRef(att.url, {
+                        contentType: att.contentType,
+                        filename: att.name,
+                        source: 'replied message image'
+                    });
+                }
             });
-            repliedMessage.embeds.forEach(processEmbed);
+            repliedMessage.embeds.forEach(embed => processEmbed(embed, 'replied embed image'));
         }
-        const images = imagesToProcess.slice(0, 3);
+
+        const images = imageRefs.slice(0, MAX_IMAGES_PER_MESSAGE);
+        if (!userText) {
+            userText = images.length > 0 ? `[Attached ${images.length} image${images.length === 1 ? '' : 's'}]` : "Hello!";
+        }
 
         // Generate Image Descriptions
         let imageDescriptions = [];
-        if (images.length > 0 && config.use_chat_vision) {
-            // Native Chat Vision is enabled, skip the secondary vision model here
-        } else if (images.length > 0 && config.vision_model) {
-            await message.channel.sendTyping(); // Show thinking state during vision processing
-            for (let i = 0; i < images.length; i++) {
+        let preparedImages = [];
+        const useChatVision = this._configFlag(config.use_chat_vision);
+        const hasVisionModel = !!(config.vision_model && config.vision_model.trim());
+
+        if (images.length > 0 && (useChatVision || hasVisionModel)) {
+            await message.channel.sendTyping(); // Show thinking state during image preparation
+            preparedImages = await this._prepareImagesForVision(images);
+        }
+
+        if (images.length > 0 && useChatVision) {
+            imageDescriptions.push(`[User attached ${images.length} image${images.length === 1 ? '' : 's'}. The image data is attached directly to this user message for vision analysis.]`);
+        } else if (images.length > 0 && hasVisionModel) {
+            for (let i = 0; i < preparedImages.length; i++) {
                 try {
-                    const visionResponse = await visionOpenai.chat.completions.create({
-                        model: config.vision_model,
-                        messages: [
-                            {
-                                role: "user",
-                                content: [
-                                    { type: "text", text: "Please provide a detailed, concise description of this image. Focus on the main subjects, actions, environment, and mood so that someone who cannot see it can understand it perfectly." },
-                                    { type: "image_url", image_url: { url: images[i] } }
-                                ]
-                            }
-                        ],
-                        max_tokens: 400
-                    });
-                    const desc = visionResponse.choices[0]?.message?.content?.trim();
+                    const desc = await this._describeImageWithFallback(visionOpenai, config.vision_model, preparedImages[i]);
                     if (desc) imageDescriptions.push(`[Attached Image ${i + 1} Description: ${desc}]`);
                 } catch (err) {
                     console.error('[CordBridge] Vision API Error:', err.message);
-                    imageDescriptions.push(`[Attached Image ${i + 1}: (Failed to read image due to API error)]`);
+                    imageDescriptions.push(`[Attached Image ${i + 1}: Image was attached, but image reading failed after retrying. Source: ${preparedImages[i].source || 'message image'}]`);
                 }
             }
-        } else if (images.length > 0 && !config.vision_model) {
-            imageDescriptions.push(`[User attached ${images.length} image(s) but my optical sensors are disabled. I cannot see them.]`);
+        } else if (images.length > 0 && !hasVisionModel) {
+            imageDescriptions.push(`[User attached ${images.length} image${images.length === 1 ? '' : 's'}, but image reading is not configured for this bot.]`);
         }
 
         // Resolve Discord <@id> mentions back into actual usernames
@@ -433,7 +483,7 @@ class BotManager {
                     if (typeof randomPhrase === 'object' && randomPhrase.type === 'audio') {
                         const filePath = path.join(__dirname, randomPhrase.path);
                         if (fs.existsSync(filePath)) {
-                            await message.reply({ 
+                            await this._sendReplyPayload(message, {
                                 files: [{ 
                                     attachment: filePath, 
                                     name: 'response.mp3' 
@@ -441,13 +491,13 @@ class BotManager {
                             });
                             this._saveMessage(botId, channelId, guildId, 'assistant', `[Sent audio file: ${randomPhrase.originalName || 'response.mp3'}]`);
                         } else {
-                            await message.reply("[Error: Audio file not found]");
+                            await this._sendTextReply(message, "[Error: Audio file not found]");
                             this._saveMessage(botId, channelId, guildId, 'assistant', '[Error: Audio file not found]');
                         }
                     } else {
                         // It's a string, or fallback
                         const text = typeof randomPhrase === 'string' ? randomPhrase : (randomPhrase.text || '...');
-                        await message.reply(text);
+                        await this._sendTextReply(message, text);
                         this._saveMessage(botId, channelId, guildId, 'assistant', text);
                     }
                 } catch (err) {
@@ -459,22 +509,26 @@ class BotManager {
 
         try {
             await message.channel.sendTyping();
+            const requestId = `${Date.now().toString(36)}-${message.id.slice(-6)}`;
 
             // Build context from DB with compression (pass resolvedText for cross-bot awareness)
-            const messages = await this._buildContext(botId, channelId, config, openai, resolvedText, message);
+            const messages = await this._buildContext(botId, channelId, config, openai, resolvedText, message, requestId);
 
             // NATIVE CHAT VISION INJECTION
-            if (config.use_chat_vision && images.length > 0) {
+            let nativeVisionInjected = false;
+            let nativeOriginalUrlMessages = null;
+            if (useChatVision && preparedImages.length > 0) {
                 // Find the last user message to attach the images natively (searching backwards in case of appended system contexts)
                 for (let i = messages.length - 1; i >= 0; i--) {
                     if (messages[i].role === 'user') {
                         const userMsg = messages[i];
                         const textContent = userMsg.content;
                         const multimodalContent = [{ type: 'text', text: textContent }];
-                        for (const imgUrl of images) {
-                            multimodalContent.push({ type: 'image_url', image_url: { url: imgUrl } });
+                        for (const image of preparedImages) {
+                            multimodalContent.push({ type: 'image_url', image_url: { url: image.visionUrl } });
                         }
                         userMsg.content = multimodalContent;
+                        nativeVisionInjected = true;
                         break;
                     }
                 }
@@ -483,6 +537,10 @@ class BotManager {
             // Prefill
             if (config.prefill && config.prefill.trim() !== '') {
                 messages.push({ role: "assistant", content: config.prefill });
+            }
+
+            if (nativeVisionInjected && preparedImages.some(image => image.originalUrl && image.originalUrl !== image.visionUrl)) {
+                nativeOriginalUrlMessages = this._replaceImagePayloads(messages, preparedImages.map(image => image.originalUrl));
             }
 
             // Call the AI API
@@ -506,14 +564,15 @@ class BotManager {
                 apiParams.extra_body = {
                     provider: {
                         order: providersOrder,
-                        allow_fallbacks: false
+                        allow_fallbacks: true
                     }
                 };
             }
 
             // --- LOG REQUEST (lightweight — no deep cloning of full context) ---
-            const estimatedTokens = messages.reduce((sum, m) => sum + this._estimateTokens(typeof m.content === 'string' ? m.content : JSON.stringify(m.content)), 0);
+            const estimatedTokens = messages.reduce((sum, m) => sum + this._estimateTokens(this._contentForTokenEstimate(m.content)), 0);
             this._saveLog(botId, guildId, 'api_request', {
+                requestId,
                 model: config.model,
                 messageCount: messages.length,
                 estimatedPromptTokens: estimatedTokens,
@@ -522,10 +581,18 @@ class BotManager {
                 hasImages: messages.some(m => Array.isArray(m.content)),
             }, config);
 
-            const response = await openai.chat.completions.create(apiParams);
+            const response = await this._createChatCompletionWithFallbacks(openai, apiParams, {
+                botId,
+                guildId,
+                config,
+                requestId,
+                nativeVisionInjected,
+                nativeOriginalUrlMessages
+            });
 
             // --- LOG RESPONSE (metadata only — no full completion text) ---
             this._saveLog(botId, guildId, 'api_response', {
+                requestId,
                 finishReason: response.choices?.[0]?.finish_reason,
                 responseLength: response.choices?.[0]?.message?.content?.length || 0,
                 usage: response.usage
@@ -545,23 +612,15 @@ class BotManager {
                 replyContent = config.prefill + replyContent;
             }
 
-            // Save the bot's response to the database
-            this._saveMessage(botId, channelId, guildId, 'assistant', replyContent);
+            await this._sendTextReply(message, replyContent);
 
-            // Chunk if over Discord's 2000 char limit
-            if (replyContent.length > 2000) {
-                const chunks = replyContent.match(/[\s\S]{1,1999}/g) || [];
-                for (const chunk of chunks) {
-                    await message.reply(chunk);
-                }
-            } else {
-                await message.reply(replyContent);
-            }
+            // Save the bot's response to the database after Discord accepts it
+            this._saveMessage(botId, channelId, guildId, 'assistant', replyContent);
 
         } catch (error) {
             console.error(`[CordBridge] API Error for bot "${config.name}":`, error.message);
             try {
-                await message.reply('Sorry, I encountered an error while trying to process that request.');
+                await this._sendTextReply(message, 'Sorry, I encountered an error while trying to process that request.');
             } catch (_) { /* ignore reply errors */ }
         }
     }
@@ -585,11 +644,12 @@ class BotManager {
     _saveLog(botId, guildId, type, contentObj, config) {
         try {
             const db = getDb();
-            const retentionDays = config && config.log_retention_days !== undefined ? config.log_retention_days : 7;
+            const retentionDaysRaw = config && config.log_retention_days !== undefined ? config.log_retention_days : 7;
+            const retentionDays = Math.max(0, Number.parseInt(retentionDaysRaw, 10) || 0);
             
             // Cleanup older logs (skip if 0 means keep forever)
             if (retentionDays > 0) {
-                db.prepare(`DELETE FROM bot_logs WHERE bot_id = ? AND created_at < datetime('now', '-${retentionDays} days')`).run(botId);
+                db.prepare("DELETE FROM bot_logs WHERE bot_id = ? AND created_at < datetime('now', ?)").run(botId, `-${retentionDays} days`);
             }
 
             const contentStr = JSON.stringify(contentObj);
@@ -600,12 +660,311 @@ class BotManager {
         }
     }
 
+    _configFlag(value) {
+        return value === true || value === 1 || value === '1' || value === 'true';
+    }
+
+    async _sendTextReply(message, content) {
+        const chunks = this._splitDiscordMessage(content);
+        for (let i = 0; i < chunks.length; i++) {
+            if (i === 0) {
+                await this._sendReplyPayload(message, chunks[i]);
+            } else {
+                try {
+                    await message.channel.send(chunks[i]);
+                } catch (err) {
+                    console.error('[CordBridge] Failed to send follow-up chunk, retrying as reply:', err.message);
+                    await this._sendReplyPayload(message, chunks[i]);
+                }
+            }
+        }
+    }
+
+    async _sendReplyPayload(message, payload) {
+        try {
+            return await message.reply(payload);
+        } catch (replyErr) {
+            console.error('[CordBridge] Discord reply failed, retrying as channel message:', replyErr.message);
+            try {
+                return await message.channel.send(payload);
+            } catch (sendErr) {
+                console.error('[CordBridge] Discord channel send failed:', sendErr.message);
+                throw sendErr;
+            }
+        }
+    }
+
+    _splitDiscordMessage(content) {
+        let remaining = String(content || '').trim();
+        if (!remaining) remaining = '...';
+
+        const chunks = [];
+        const maxChunkLength = DISCORD_MESSAGE_LIMIT - 10;
+        while (remaining.length > DISCORD_MESSAGE_LIMIT) {
+            let splitAt = remaining.lastIndexOf('\n', maxChunkLength);
+            if (splitAt < 1000) splitAt = remaining.lastIndexOf(' ', maxChunkLength);
+            if (splitAt < 1000) splitAt = maxChunkLength;
+
+            const chunk = remaining.slice(0, splitAt).trimEnd();
+            if (chunk) chunks.push(chunk);
+            remaining = remaining.slice(splitAt).trimStart();
+        }
+
+        if (remaining) chunks.push(remaining);
+        return chunks.length > 0 ? chunks : ['...'];
+    }
+
+    _isImageAttachment(att) {
+        if (!att) return false;
+        const contentType = (att.contentType || '').toLowerCase();
+        if (contentType.startsWith('image/')) return true;
+        if (att.width && att.height) return true;
+
+        const name = (att.name || att.filename || att.url || '').toLowerCase();
+        return /\.(png|jpe?g|gif|webp|bmp|avif)(?:[?#].*)?$/.test(name);
+    }
+
+    async _prepareImagesForVision(images) {
+        const prepared = [];
+        for (const image of images) {
+            prepared.push(await this._prepareImageForVision(image));
+        }
+        return prepared;
+    }
+
+    async _prepareImageForVision(image) {
+        const prepared = {
+            ...image,
+            originalUrl: image.url,
+            visionUrl: image.url,
+            fetchError: null
+        };
+
+        if (!image.url || image.url.startsWith('data:')) {
+            return prepared;
+        }
+
+        try {
+            prepared.visionUrl = await this._downloadImageAsDataUrl(image.url, image.contentType, image.filename);
+        } catch (err) {
+            prepared.fetchError = err.message;
+            console.warn(`[CordBridge] Could not cache image locally for vision; falling back to original URL: ${err.message}`);
+        }
+
+        return prepared;
+    }
+
+    async _downloadImageAsDataUrl(url, contentTypeHint = '', filenameHint = '') {
+        if (typeof fetch !== 'function') {
+            throw new Error('fetch is not available in this Node.js runtime');
+        }
+
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), IMAGE_FETCH_TIMEOUT_MS);
+
+        let response;
+        try {
+            response = await fetch(url, {
+                signal: controller.signal,
+                headers: {
+                    'Accept': 'image/*,*/*;q=0.8',
+                    'User-Agent': 'CordBridge/1.0'
+                }
+            });
+        } finally {
+            clearTimeout(timeout);
+        }
+
+        if (!response.ok) {
+            throw new Error(`image fetch returned HTTP ${response.status}`);
+        }
+
+        const contentLength = Number(response.headers.get('content-length') || 0);
+        if (contentLength > MAX_IMAGE_BYTES) {
+            throw new Error(`image is too large (${contentLength} bytes)`);
+        }
+
+        const responseType = (response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+        const hintedType = (contentTypeHint || '').split(';')[0].trim().toLowerCase();
+        let mimeType = responseType || hintedType || this._mimeFromFilename(filenameHint || url);
+        if (!mimeType || mimeType === 'application/octet-stream') {
+            mimeType = this._mimeFromFilename(filenameHint || url);
+        }
+        if (!mimeType || !mimeType.startsWith('image/')) {
+            throw new Error(`URL did not return an image (${responseType || 'unknown content type'})`);
+        }
+
+        const arrayBuffer = await response.arrayBuffer();
+        if (arrayBuffer.byteLength > MAX_IMAGE_BYTES) {
+            throw new Error(`image is too large (${arrayBuffer.byteLength} bytes)`);
+        }
+
+        const base64 = Buffer.from(arrayBuffer).toString('base64');
+        return `data:${mimeType};base64,${base64}`;
+    }
+
+    _mimeFromFilename(filename = '') {
+        const cleanName = filename.toLowerCase().split('?')[0].split('#')[0];
+        if (cleanName.endsWith('.png')) return 'image/png';
+        if (cleanName.endsWith('.jpg') || cleanName.endsWith('.jpeg')) return 'image/jpeg';
+        if (cleanName.endsWith('.gif')) return 'image/gif';
+        if (cleanName.endsWith('.webp')) return 'image/webp';
+        if (cleanName.endsWith('.bmp')) return 'image/bmp';
+        if (cleanName.endsWith('.avif')) return 'image/avif';
+        return '';
+    }
+
+    async _describeImageWithFallback(visionOpenai, visionModel, image) {
+        if (!visionOpenai) {
+            throw new Error('No vision provider is configured');
+        }
+
+        const urlsToTry = [];
+        if (image.visionUrl) urlsToTry.push(image.visionUrl);
+        if (image.originalUrl && image.originalUrl !== image.visionUrl) urlsToTry.push(image.originalUrl);
+
+        const errors = [];
+        for (const url of urlsToTry) {
+            try {
+                const visionResponse = await visionOpenai.chat.completions.create({
+                    model: visionModel,
+                    messages: [
+                        {
+                            role: "user",
+                            content: [
+                                { type: "text", text: "Please provide a detailed, concise description of this image. Focus on the main subjects, actions, environment, and mood so that someone who cannot see it can understand it perfectly." },
+                                { type: "image_url", image_url: { url } }
+                            ]
+                        }
+                    ],
+                    max_tokens: 500
+                });
+                const desc = visionResponse.choices[0]?.message?.content?.trim();
+                if (desc) return desc;
+                errors.push('vision model returned an empty description');
+            } catch (err) {
+                errors.push(err.message);
+            }
+        }
+
+        throw new Error(errors.join(' | ') || 'image description failed');
+    }
+
+    async _createChatCompletionWithFallbacks(openai, apiParams, context) {
+        const attempts = [{ label: 'primary', params: apiParams }];
+
+        if (context.nativeOriginalUrlMessages) {
+            attempts.push({
+                label: 'with original image URLs',
+                params: { ...apiParams, messages: context.nativeOriginalUrlMessages }
+            });
+        }
+
+        if (apiParams.extra_body) {
+            const withoutProviderOrder = { ...apiParams };
+            delete withoutProviderOrder.extra_body;
+            attempts.push({ label: 'without preferred provider order', params: withoutProviderOrder });
+
+            if (context.nativeOriginalUrlMessages) {
+                const originalUrlsWithoutProviderOrder = { ...apiParams, messages: context.nativeOriginalUrlMessages };
+                delete originalUrlsWithoutProviderOrder.extra_body;
+                attempts.push({
+                    label: 'with original image URLs and without preferred provider order',
+                    params: originalUrlsWithoutProviderOrder
+                });
+            }
+        }
+
+        if (context.nativeVisionInjected) {
+            const textOnlyMessages = this._stripImagesFromMessages(
+                apiParams.messages,
+                '[Image handling note: the image payload could not be delivered to the chat provider on the first attempt, so this retry only has the text and saved image context.]'
+            );
+            attempts.push({
+                label: 'without native image payloads',
+                params: { ...apiParams, messages: textOnlyMessages }
+            });
+
+            if (apiParams.extra_body) {
+                const textOnlyWithoutProviderOrder = { ...apiParams, messages: textOnlyMessages };
+                delete textOnlyWithoutProviderOrder.extra_body;
+                attempts.push({
+                    label: 'without native image payloads or preferred provider order',
+                    params: textOnlyWithoutProviderOrder
+                });
+            }
+        }
+
+        let lastError = null;
+        for (let i = 0; i < attempts.length; i++) {
+            const attempt = attempts[i];
+            try {
+                return await openai.chat.completions.create(attempt.params);
+            } catch (err) {
+                lastError = err;
+                const nextAttempt = attempts[i + 1];
+                if (nextAttempt) {
+                    console.warn(`[CordBridge] API attempt "${attempt.label}" failed; retrying ${nextAttempt.label}:`, err.message);
+                    this._saveLog(context.botId, context.guildId, 'api_retry', {
+                        requestId: context.requestId,
+                        failedAttempt: attempt.label,
+                        nextAttempt: nextAttempt.label,
+                        error: err.message
+                    }, context.config);
+                }
+            }
+        }
+
+        throw lastError || new Error('All API attempts failed');
+    }
+
+    _replaceImagePayloads(messages, imageUrls) {
+        let imageIndex = 0;
+        return messages.map(message => {
+            if (!Array.isArray(message.content)) {
+                return { ...message };
+            }
+
+            return {
+                ...message,
+                content: message.content.map(part => {
+                    if (!part || part.type !== 'image_url') return part && typeof part === 'object' ? { ...part } : part;
+                    const url = imageUrls[imageIndex++] || part.image_url?.url;
+                    return {
+                        ...part,
+                        image_url: {
+                            ...(part.image_url || {}),
+                            url
+                        }
+                    };
+                })
+            };
+        });
+    }
+
+    _stripImagesFromMessages(messages, note) {
+        return messages.map(message => {
+            if (!Array.isArray(message.content)) {
+                return { ...message };
+            }
+
+            const textParts = message.content
+                .filter(part => part && part.type === 'text' && part.text)
+                .map(part => part.text);
+
+            return {
+                ...message,
+                content: `${textParts.join('\n')}\n\n${note}`.trim()
+            };
+        });
+    }
+
     /**
      * Build the message context array from stored history.
      * Fits as many recent messages as the token budget allows,
      * and summarizes older overflow messages via an AI call.
      */
-    async _buildContext(botId, channelId, config, openai, userText = '', discordMessage = null) {
+    async _buildContext(botId, channelId, config, openai, userText = '', discordMessage = null, requestId = null) {
         const db = getDb();
         const messages = [];
         const guildId = discordMessage?.guild?.id || 'DM';
@@ -616,13 +975,24 @@ class BotManager {
         let allStoredMessages;
         if (guildId === 'DM') {
             allStoredMessages = db.prepare(
-                'SELECT id, role, content, created_at FROM messages WHERE bot_id = ? AND channel_id = ? ORDER BY created_at DESC LIMIT ?'
-            ).all(botId, channelId, MSG_LOAD_LIMIT).reverse();
+                'SELECT id, role, content, created_at FROM messages WHERE bot_id = ? AND (channel_id = ? OR (guild_id = ? AND role = ? AND content LIKE ?)) ORDER BY created_at DESC LIMIT ?'
+            ).all(botId, channelId, 'DM', 'system', `${SUMMARY_MARKER}%`, MSG_LOAD_LIMIT).reverse();
         } else {
             allStoredMessages = db.prepare(
                 'SELECT id, role, content, created_at FROM messages WHERE bot_id = ? AND guild_id = ? ORDER BY created_at DESC LIMIT ?'
             ).all(botId, guildId, MSG_LOAD_LIMIT).reverse();
         }
+
+        const summaryRows = [];
+        const conversationMessages = [];
+        for (const storedMessage of allStoredMessages) {
+            if (this._isSummaryMessage(storedMessage)) {
+                summaryRows.push(storedMessage);
+            } else {
+                conversationMessages.push(storedMessage);
+            }
+        }
+        const existingSummary = this._combineSummaryRows(summaryRows);
 
         // 1b. Cross-bot awareness: if the user mentions another bot by name,
         //     inject that bot's character prompt so this bot knows about them
@@ -653,13 +1023,17 @@ class BotManager {
             messages.push({ role: "system", content: `[Example messages showing how this character typically talks — use these for tone and style reference only, do not repeat them verbatim:]\n${config.example_messages}` });
         }
 
-        // 2. We already fetched ALL stored messages above into allStoredMessages
-        if (allStoredMessages.length === 0) {
+        // 2. We already fetched ALL stored messages above into allStoredMessages.
+        //    Stored summaries are durable memory, not normal chat turns.
+        if (conversationMessages.length === 0) {
+            if (existingSummary) {
+                messages.push({ role: "system", content: this._formatMemorySummary(existingSummary) });
+            }
             return messages;
         }
 
         // 3. Token budget calculation
-        const totalBudget = (config.max_prompt_tokens || 10000);
+        const totalBudget = Math.max(500, Number.parseInt(config.max_prompt_tokens, 10) || 10000);
         let reservedTokens = 50; // Start with a 50 token safety margin
 
         // Account for all tokens already placed in the 'messages' array (system prompt, first message, cross-bot context, etc)
@@ -671,32 +1045,38 @@ class BotManager {
         if (config.prefill && typeof config.prefill === 'string') {
             reservedTokens += this._estimateTokens(config.prefill);
         }
+
+        if (existingSummary) {
+            reservedTokens += Math.min(this._estimateTokens(this._formatMemorySummary(existingSummary)), 1800);
+        }
         
         // Reserve an estimated 350 tokens for the AI summary string that will be injected if there is an overflow
-        reservedTokens += 350;
+        reservedTokens += 500;
 
         let availableBudget = totalBudget - reservedTokens;
         if (availableBudget < 200) availableBudget = 200; // minimum
         
         let totalStoredTokens = 0;
-        for (const m of allStoredMessages) totalStoredTokens += this._estimateTokens(m.content);
+        for (const m of conversationMessages) totalStoredTokens += this._estimateTokens(m.content);
 
         // 4. Determine context to keep vs summarize
         const recentMessages = [];
         let cutoffIndex = 0;
 
-        if (totalStoredTokens > availableBudget && allStoredMessages.length > 1) {
-            // Buffer creation: target ~50% of available budget to leave room for future messages
-            const targetBudget = availableBudget * 0.5;
+        if (totalStoredTokens > availableBudget && conversationMessages.length > 1) {
+            // Keep a generous recent tail so the bot continues from the current thread, not from its base prompt.
+            const targetBudget = availableBudget * 0.7;
+            const minRecentCount = Math.min(8, conversationMessages.length);
             let recentTokens = 0;
             
-            for (let i = allStoredMessages.length - 1; i >= 0; i--) {
-                const msg = allStoredMessages[i];
+            for (let i = conversationMessages.length - 1; i >= 0; i--) {
+                const msg = conversationMessages[i];
                 const msgTokens = this._estimateTokens(msg.content);
+                const isRequiredTail = i >= conversationMessages.length - minRecentCount;
                 
                 // Always preserve the very latest message (the user's prompt) so they don't lose context for this turn
                 // Otherwise, stop when adding the next message would exceed our buffered target
-                if (i !== allStoredMessages.length - 1 && recentTokens + msgTokens > targetBudget) {
+                if (!isRequiredTail && i !== conversationMessages.length - 1 && recentTokens + msgTokens > targetBudget) {
                     cutoffIndex = i + 1;
                     break;
                 }
@@ -706,20 +1086,20 @@ class BotManager {
             }
         } else {
             // Fits entirely in budget
-            for (const msg of allStoredMessages) {
+            for (const msg of conversationMessages) {
                 recentMessages.push({ role: msg.role, content: msg.content });
             }
         }
 
         // 5. If there are older messages that didn't fit, summarize them and save to DB
         if (cutoffIndex > 0) {
-            const oldMessages = allStoredMessages.slice(0, cutoffIndex);
-            const summaryMaxTokens = Math.min(1500, Math.floor(availableBudget * 0.3));
+            const oldMessages = conversationMessages.slice(0, cutoffIndex);
+            const summaryMaxTokens = Math.max(300, Math.min(1800, Math.floor(availableBudget * 0.35)));
 
             try {
-                const summary = await this._summarizeMessages(oldMessages, openai, config.model, summaryMaxTokens);
+                const summary = await this._summarizeMessages(oldMessages, openai, config.model, summaryMaxTokens, existingSummary);
                 if (summary) {
-                    const summaryContent = `[Previous conversation summary]\n${summary}`;
+                    const summaryContent = this._formatMemorySummary(summary);
                     
                     messages.push({
                         role: "system",
@@ -727,7 +1107,7 @@ class BotManager {
                     });
                     
                     // Permanent buffer swap in DB: delete summarized messages, insert the new summary
-                    const oldIds = oldMessages.map(m => m.id);
+                    const oldIds = [...summaryRows.map(m => m.id), ...oldMessages.map(m => m.id)];
                     if (oldIds.length > 0) {
                         try {
                             const placeholders = oldIds.map(() => '?').join(',');
@@ -736,16 +1116,26 @@ class BotManager {
                             // Insert new summary using the timestamp of the last summarized message so it stays in order
                             const lastOldMsg = oldMessages[oldMessages.length - 1];
                             db.prepare('INSERT INTO messages (bot_id, channel_id, guild_id, role, content, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-                                .run(botId, channelId, discordMessage?.guild?.id || '', 'system', summaryContent, lastOldMsg.created_at);
+                                .run(botId, channelId, guildId, 'system', summaryContent, lastOldMsg.created_at);
                         } catch (dbErr) {
                             console.error('[CordBridge] Failed to save summary to DB:', dbErr.message);
                         }
                     }
+                } else {
+                    messages.push({
+                        role: "system",
+                        content: this._formatMemorySummary(this._buildFallbackSummary(oldMessages, existingSummary))
+                    });
                 }
             } catch (err) {
-                console.error('[CordBridge] Summary generation failed, skipping older context:', err.message);
-                // If summary fails, we skip older context this turn. It will try again next turn.
+                console.error('[CordBridge] Summary generation failed, using local fallback memory:', err.message);
+                messages.push({
+                    role: "system",
+                    content: this._formatMemorySummary(this._buildFallbackSummary(oldMessages, existingSummary))
+                });
             }
+        } else if (existingSummary) {
+            messages.push({ role: "system", content: this._formatMemorySummary(existingSummary) });
         }
 
         // 6. Append the recent messages (verbatim)
@@ -759,9 +1149,10 @@ class BotManager {
         }
 
         let totalTks = 0;
-        messages.forEach(m => totalTks += this._estimateTokens(typeof m.content === 'string' ? m.content : JSON.stringify(m.content)));
+        messages.forEach(m => totalTks += this._estimateTokens(this._contentForTokenEstimate(m.content)));
         
         this._saveLog(botId, guildId, 'context_built', {
+            requestId,
             channelId,
             totalTokens: totalTks,
             messageCount: messages.length,
@@ -771,13 +1162,50 @@ class BotManager {
         return messages;
     }
 
+    _isSummaryMessage(message) {
+        return message?.role === 'system' && typeof message.content === 'string' && message.content.startsWith(SUMMARY_MARKER);
+    }
+
+    _stripSummaryMarker(content = '') {
+        return content
+            .replace(SUMMARY_MARKER, '')
+            .replace(SUMMARY_INSTRUCTIONS, '')
+            .trim();
+    }
+
+    _combineSummaryRows(summaryRows) {
+        if (!summaryRows || summaryRows.length === 0) return '';
+        return summaryRows
+            .map(row => this._stripSummaryMarker(row.content))
+            .filter(Boolean)
+            .join('\n\n');
+    }
+
+    _formatMemorySummary(summary) {
+        const cleanSummary = this._stripSummaryMarker(summary);
+        return `${SUMMARY_MARKER}\n${SUMMARY_INSTRUCTIONS}\n\n${cleanSummary}`.trim();
+    }
+
+    _buildFallbackSummary(oldMessages, existingSummary = '') {
+        const tail = oldMessages.slice(-20).map(m => {
+            const label = m.role === 'user' ? 'User' : (m.role === 'assistant' ? 'Bot' : 'System');
+            return `${label}: ${m.content}`;
+        }).join('\n');
+
+        const parts = [];
+        if (existingSummary) parts.push(`Existing durable memory:\n${existingSummary}`);
+        if (tail) parts.push(`Recent older transcript retained because AI summarization failed:\n${tail}`);
+        return parts.join('\n\n').slice(0, 6000);
+    }
+
     /**
      * Ask the AI to summarize a list of older messages into a compact paragraph.
      */
-    async _summarizeMessages(oldMessages, openai, model, maxTokens) {
-        const transcript = oldMessages.map(m =>
-            `${m.role === 'user' ? 'User' : 'Bot'}: ${m.content}`
-        ).join('\n');
+    async _summarizeMessages(oldMessages, openai, model, maxTokens, existingSummary = '') {
+        const transcript = oldMessages.map(m => {
+            const label = m.role === 'user' ? 'User' : (m.role === 'assistant' ? 'Bot' : 'System');
+            return `${label}: ${m.content}`;
+        }).join('\n');
 
         // Truncate the transcript itself if absurdly long (>40k chars ≈ 10k tokens)
         const truncatedTranscript = transcript.length > 40000
@@ -789,11 +1217,15 @@ class BotManager {
             messages: [
                 {
                     role: "system",
-                    content: "You are an AI conversation memory summarizer. Condense the following conversation into a dense summary paragraph. CRITICAL: Pay special attention to the relationship between the bot and each unique user (or other bot) it interacts with. Note their dynamics, established rapport, stated opinions about each other, inside jokes, and key facts. Preserve names and important topics, but prioritize how characters relate to one another."
+                    content: "You maintain durable memory for a Discord character bot. Update the memory so the bot can continue later without resetting to a first-message or base-prompt state. Preserve concrete names, identities, relationships, emotional dynamics, preferences, promises, unresolved threads, decisions, images/files that were discussed, and current conversation momentum. Keep it compact but specific. Do not roleplay and do not add facts that are not supported."
                 },
                 {
                     role: "user",
-                    content: truncatedTranscript
+                    content: [
+                        existingSummary ? `Existing durable memory:\n${existingSummary}` : 'Existing durable memory: none yet.',
+                        `New transcript to merge:\n${truncatedTranscript}`,
+                        'Return only updated durable memory with short labeled sections: Current situation, People and relationships, Important facts and preferences, Open threads, Image/file context, Tone and continuity cues.'
+                    ].join('\n\n')
                 }
             ],
             temperature: 0.3,
@@ -963,6 +1395,17 @@ class BotManager {
     /**
      * Rough token estimate: ~4 chars per token (same heuristic used elsewhere).
      */
+    _contentForTokenEstimate(content) {
+        if (Array.isArray(content)) {
+            return content.map(part => {
+                if (part?.type === 'text') return part.text || '';
+                if (part?.type === 'image_url') return '[image attachment]';
+                return '';
+            }).join('\n');
+        }
+        return content;
+    }
+
     _estimateTokens(text) {
         if (!text) return 0;
         return Math.ceil(text.length / 4);

@@ -11,6 +11,45 @@ const BotManager = require('./BotManager');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const botManager = new BotManager();
+const MEMORY_SUMMARY_MARKER = '[Previous conversation summary]';
+const MEMORY_SUMMARY_INSTRUCTIONS = 'Durable memory from earlier in this conversation. Use it to continue naturally; do not treat this as a new chat, do not reintroduce yourself unless asked, and preserve the established relationships, preferences, and open threads.';
+
+function numberOr(value, fallback) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function intOr(value, fallback) {
+    const parsed = Number.parseInt(value, 10);
+    return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function jsonArrayStringOr(value, fallback = '[]') {
+    if (Array.isArray(value)) return JSON.stringify(value.map(String).filter(Boolean));
+    if (typeof value !== 'string') return fallback;
+    try {
+        const parsed = JSON.parse(value);
+        return Array.isArray(parsed) ? JSON.stringify(parsed.map(String).filter(Boolean)) : fallback;
+    } catch (_) {
+        return fallback;
+    }
+}
+
+function isMemorySummary(row) {
+    return row?.role === 'system' && typeof row.content === 'string' && row.content.startsWith(MEMORY_SUMMARY_MARKER);
+}
+
+function stripMemorySummary(content = '') {
+    return content
+        .replace(MEMORY_SUMMARY_MARKER, '')
+        .replace(MEMORY_SUMMARY_INSTRUCTIONS, '')
+        .trim();
+}
+
+function formatMemorySummary(summary = '') {
+    const clean = stripMemorySummary(summary);
+    return `${MEMORY_SUMMARY_MARKER}\n${MEMORY_SUMMARY_INSTRUCTIONS}\n\n${clean}`.trim();
+}
 
 // Middleware
 app.use(cors());
@@ -99,7 +138,7 @@ app.put('/api/providers/:id', (req, res) => {
     db.prepare('UPDATE providers SET name = ?, base_url = ?, api_key = ? WHERE id = ?').run(newName, newUrl, newKey, req.params.id);
 
     // Reload config for any running bots using this provider
-    const botsUsingProvider = db.prepare('SELECT id FROM bots WHERE provider_id = ?').all(req.params.id);
+    const botsUsingProvider = db.prepare('SELECT id FROM bots WHERE provider_id = ? OR vision_provider_id = ?').all(req.params.id, req.params.id);
     for (const bot of botsUsingProvider) {
         botManager.reloadConfig(bot.id);
     }
@@ -123,7 +162,8 @@ app.get('/api/providers/:id/models', async (req, res) => {
     if (!provider) return res.status(404).json({ error: 'Provider not found' });
 
     try {
-        const response = await fetch(`${provider.base_url}/models`, {
+        const baseUrl = provider.base_url.endsWith('/') ? provider.base_url : `${provider.base_url}/`;
+        const response = await fetch(`${baseUrl}models`, {
             headers: {
                 'Authorization': `Bearer ${provider.api_key}`,
                 'Content-Type': 'application/json'
@@ -210,16 +250,16 @@ app.post('/api/bots', (req, res) => {
         first_message || '',
         example_messages || '',
         prefill || '',
-        temperature ?? 0.9,
-        top_p ?? 0.9,
-        max_tokens ?? 300,
-        max_prompt_tokens ?? 10000,
-        presence_penalty ?? 0.0,
-        frequency_penalty ?? 0.0,
+        numberOr(temperature, 0.9),
+        numberOr(top_p, 0.9),
+        intOr(max_tokens, 300),
+        intOr(max_prompt_tokens, 10000),
+        numberOr(presence_penalty, 0.0),
+        numberOr(frequency_penalty, 0.0),
         auto_start ? 1 : 0,
-        allowed_guilds || '[]',
-        providers_order || '[]',
-        log_retention_days !== undefined ? log_retention_days : 7
+        jsonArrayStringOr(allowed_guilds),
+        jsonArrayStringOr(providers_order),
+        intOr(log_retention_days, 7)
     );
     res.json({ id: result.lastInsertRowid, name });
 });
@@ -241,6 +281,16 @@ app.put('/api/bots/:id', (req, res) => {
             updates[field] = existing[field];
         }
     }
+
+    updates.temperature = numberOr(updates.temperature, existing.temperature ?? 0.9);
+    updates.top_p = numberOr(updates.top_p, existing.top_p ?? 0.9);
+    updates.max_tokens = intOr(updates.max_tokens, existing.max_tokens ?? 300);
+    updates.max_prompt_tokens = intOr(updates.max_prompt_tokens, existing.max_prompt_tokens ?? 10000);
+    updates.presence_penalty = numberOr(updates.presence_penalty, existing.presence_penalty ?? 0.0);
+    updates.frequency_penalty = numberOr(updates.frequency_penalty, existing.frequency_penalty ?? 0.0);
+    updates.log_retention_days = intOr(updates.log_retention_days, existing.log_retention_days ?? 7);
+    updates.allowed_guilds = jsonArrayStringOr(updates.allowed_guilds, existing.allowed_guilds || '[]');
+    updates.providers_order = jsonArrayStringOr(updates.providers_order, existing.providers_order || '[]');
 
     db.prepare(`
         UPDATE bots SET name=?, discord_token=?, bot_type=?, false_phrases=?, provider_id=?, vision_provider_id=?, model=?, vision_model=?, use_chat_vision=?, system_prompt=?, character_prompt=?,
@@ -327,6 +377,96 @@ app.delete('/api/bots/:id/history', (req, res) => {
         console.log(`[CordBridge] Cleared ALL history for bot id=${req.params.id} (${result.changes} messages removed)`);
     }
     res.json({ success: true, messagesRemoved: result.changes });
+});
+
+// GET inspect durable memory and recent saved messages for a bot/server
+app.get('/api/bots/:id/memory', (req, res) => {
+    const db = getDb();
+    const existing = db.prepare('SELECT * FROM bots WHERE id = ?').get(req.params.id);
+    if (!existing) return res.status(404).json({ error: 'Bot not found' });
+
+    const guildId = req.query.guild_id || 'DM';
+    const allRows = db.prepare(`
+        SELECT id, channel_id, guild_id, role, content, created_at
+        FROM messages
+        WHERE bot_id = ? AND guild_id = ?
+        ORDER BY created_at ASC, id ASC
+    `).all(req.params.id, guildId);
+
+    const summaryRows = allRows.filter(isMemorySummary);
+    const conversationRows = allRows.filter(row => !isMemorySummary(row));
+    const summary = summaryRows
+        .map(row => stripMemorySummary(row.content))
+        .filter(Boolean)
+        .join('\n\n');
+
+    res.json({
+        guild_id: guildId,
+        summary_id: summaryRows[0]?.id || null,
+        summary,
+        stats: {
+            total_messages: allRows.length,
+            summary_count: summaryRows.length,
+            conversation_count: conversationRows.length,
+            latest_message_at: allRows[allRows.length - 1]?.created_at || null,
+        },
+        recent_messages: conversationRows.slice(-50),
+    });
+});
+
+// PUT update durable memory summary for a bot/server
+app.put('/api/bots/:id/memory', (req, res) => {
+    const db = getDb();
+    const existing = db.prepare('SELECT * FROM bots WHERE id = ?').get(req.params.id);
+    if (!existing) return res.status(404).json({ error: 'Bot not found' });
+
+    const guildId = req.body.guild_id || req.query.guild_id || 'DM';
+    const summary = typeof req.body.summary === 'string' ? req.body.summary.trim() : '';
+
+    const summaryRows = db.prepare(`
+        SELECT id, channel_id
+        FROM messages
+        WHERE bot_id = ? AND guild_id = ? AND role = 'system' AND content LIKE ?
+        ORDER BY created_at ASC, id ASC
+    `).all(req.params.id, guildId, `${MEMORY_SUMMARY_MARKER}%`);
+
+    if (!summary) {
+        let removed = 0;
+        if (summaryRows.length > 0) {
+            const placeholders = summaryRows.map(() => '?').join(',');
+            removed = db.prepare(`DELETE FROM messages WHERE id IN (${placeholders})`).run(...summaryRows.map(row => row.id)).changes;
+        }
+        return res.json({ success: true, summary: '', messagesRemoved: removed });
+    }
+
+    let channelId = summaryRows[0]?.channel_id;
+    if (!channelId) {
+        const latest = db.prepare(`
+            SELECT channel_id
+            FROM messages
+            WHERE bot_id = ? AND guild_id = ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+        `).get(req.params.id, guildId);
+        channelId = latest?.channel_id || `memory:${guildId}`;
+    }
+
+    if (summaryRows.length > 0) {
+        const placeholders = summaryRows.map(() => '?').join(',');
+        db.prepare(`DELETE FROM messages WHERE id IN (${placeholders})`).run(...summaryRows.map(row => row.id));
+    }
+
+    const formattedSummary = formatMemorySummary(summary);
+    const result = db.prepare(`
+        INSERT INTO messages (bot_id, channel_id, guild_id, role, content)
+        VALUES (?, ?, ?, 'system', ?)
+    `).run(req.params.id, channelId, guildId, formattedSummary);
+
+    res.json({
+        success: true,
+        summary_id: result.lastInsertRowid,
+        summary,
+    });
 });
 
 // GET list servers a bot has logs in

@@ -9,7 +9,15 @@ async function request(path, options = {}) {
     headers: { 'Content-Type': 'application/json', ...options.headers },
     ...options,
   });
-  const data = await res.json();
+  const text = await res.text();
+  let data = {};
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch (_) {
+      data = { error: text };
+    }
+  }
   if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
   return data;
 }
@@ -21,7 +29,15 @@ export const upload = async (file) => {
     method: 'POST',
     body: fd
   });
-  const data = await res.json();
+  const text = await res.text();
+  let data = {};
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch (_) {
+      data = { error: text };
+    }
+  }
   if (!res.ok) throw new Error(data.error || `Upload failed (${res.status})`);
   return data;
 };
@@ -46,13 +62,15 @@ export const bots = {
   start:        (id)         => request(`/bots/${id}/start`, { method: 'POST' }),
   stop:         (id)         => request(`/bots/${id}/stop`, { method: 'POST' }),
   getHistory:   (id)         => request(`/bots/${id}/history`),
-  clearHistory: (id, guildId) => request(`/bots/${id}/history${guildId ? `?guild_id=${guildId}` : ''}`, { method: 'DELETE' }),
+  clearHistory: (id, guildId) => request(`/bots/${id}/history${guildId ? `?guild_id=${encodeURIComponent(guildId)}` : ''}`, { method: 'DELETE' }),
+  getMemory:     (id, guildId) => request(`/bots/${id}/memory${guildId ? `?guild_id=${encodeURIComponent(guildId)}` : ''}`),
+  saveMemory:    (id, guildId, summary) => request(`/bots/${id}/memory`, { method: 'PUT', body: JSON.stringify({ guild_id: guildId || 'DM', summary }) }),
   getLorebooks:    (id)              => request(`/bots/${id}/lorebooks`),
   attachLorebook:  (id, lorebookId)  => request(`/bots/${id}/lorebooks`, { method: 'POST', body: JSON.stringify({ lorebook_id: lorebookId }) }),
   updateLorebook:  (id, lbId, overrides) => request(`/bots/${id}/lorebooks/${lbId}`, { method: 'PUT', body: JSON.stringify({ overrides }) }),
   detachLorebook:  (id, lbId)        => request(`/bots/${id}/lorebooks/${lbId}`, { method: 'DELETE' }),
   getLogServers:   (id)              => request(`/bots/${id}/log_servers`),
-  getLogs:         (id, guildId)     => request(`/bots/${id}/logs${guildId ? `?guild_id=${guildId}` : ''}`),
+  getLogs:         (id, guildId)     => request(`/bots/${id}/logs${guildId ? `?guild_id=${encodeURIComponent(guildId)}` : ''}`),
 };
 
 // ── Lorebooks ──

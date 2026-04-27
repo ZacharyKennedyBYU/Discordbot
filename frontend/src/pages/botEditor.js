@@ -123,7 +123,7 @@ export async function render(container, botId) {
           <div class="form-group" style="margin-top: 1rem;">
             <label class="form-label" for="bot-providers-order">OpenRouter Providers (Optional, Comma separated)</label>
             <input class="form-input" id="bot-providers-order" type="text" placeholder="Anthropic, Google, Together" value="${escapeAttr(parseStringArray(bot?.providers_order))}" />
-            <p style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.25rem;">Forces OpenRouter to use specifically these providers in this order if available.</p>
+            <p style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.25rem;">Prefers these OpenRouter providers in order while still allowing fallback when one fails.</p>
           </div>
         </div>
 
@@ -255,6 +255,7 @@ export async function render(container, botId) {
         <!-- Actions -->
         <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;">
           <div style="display: flex; gap: 0.75rem;">
+            ${!isNew ? `<button type="button" class="btn btn-ghost" id="view-memory-btn">Memory</button>` : ''}
             ${!isNew ? `<button type="button" class="btn btn-ghost" id="view-logs-btn">📋 View Logs</button>` : ''}
             ${!isNew ? `<button type="button" class="btn btn-ghost" id="clear-history-btn">🧹 Clear History</button>` : ''}
             ${!isNew ? `<button type="button" class="btn btn-danger" id="delete-btn">🗑 Delete Bot</button>` : ''}
@@ -650,6 +651,40 @@ export async function render(container, botId) {
     const dialogsContainer = document.createElement('div');
     container.appendChild(dialogsContainer);
     dialogsContainer.innerHTML = `
+      <dialog id="memory-dialog" class="inspector-dialog">
+        <div class="inspector-shell">
+          <div class="inspector-header">
+            <div>
+              <h3>Memory</h3>
+              <p class="inspector-subtitle">Durable summary and recent saved messages for this bot.</p>
+            </div>
+            <button type="button" class="btn btn-ghost" onclick="document.getElementById('memory-dialog').close()">Close</button>
+          </div>
+          <div class="inspector-toolbar">
+            <select id="memory-server-select" class="form-select">
+              <option value="">Select a server</option>
+            </select>
+            <button type="button" class="btn btn-primary" id="refresh-memory-btn">Refresh</button>
+          </div>
+          <div class="memory-layout">
+            <section class="memory-editor">
+              <div class="memory-editor-header">
+                <div>
+                  <h4>Durable Summary</h4>
+                  <span id="memory-stats" class="log-muted">No memory loaded.</span>
+                </div>
+                <button type="button" class="btn btn-success" id="save-memory-btn">Save Summary</button>
+              </div>
+              <textarea class="form-textarea memory-textarea" id="memory-summary-text" placeholder="No durable summary yet. Add one here or let conversation compression create it."></textarea>
+            </section>
+            <section class="memory-recent">
+              <h4>Recent Saved Messages</h4>
+              <div id="memory-messages-list" class="memory-messages-list">Select a server to inspect memory.</div>
+            </section>
+          </div>
+        </div>
+      </dialog>
+
       <dialog id="clear-history-dialog" class="card" style="padding: 1.5rem; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); max-width: 400px; width: 90%; margin: auto; color: var(--text);">
         <h3 style="margin-top: 0; margin-bottom: 0.5rem;">Clear Conversation History</h3>
         <p style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 1rem;">Select a server to clear memory from.</p>
@@ -660,28 +695,88 @@ export async function render(container, botId) {
         </div>
       </dialog>
 
-      <dialog id="view-logs-dialog" style="padding: 1.5rem; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); width: 90%; max-width: 800px; height: 80vh; margin: auto; color: var(--text); box-shadow: 0 4px 12px rgba(0,0,0,0.5);">
-        <div style="display: flex; flex-direction: column; height: 100%;">
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
-            <h3 style="margin: 0;">Bot Debug Logs</h3>
+      <dialog id="view-logs-dialog" class="inspector-dialog">
+        <div class="inspector-shell">
+          <div class="inspector-header">
+            <div>
+              <h3>Debug Logs</h3>
+              <p class="inspector-subtitle">Grouped request timeline, retries, token counts, and response metadata.</p>
+            </div>
             <button type="button" class="btn btn-ghost" onclick="document.getElementById('view-logs-dialog').close()">✖</button>
           </div>
-          <div style="display: flex; gap: 0.5rem; margin-bottom: 1rem;">
-            <select id="view-logs-select" class="form-select" style="flex: 1;">
+          <div class="inspector-toolbar">
+            <select id="view-logs-select" class="form-select">
               <option value="">— Select a Server —</option>
             </select>
             <button type="button" class="btn btn-primary" id="refresh-logs-btn">Refresh</button>
           </div>
-          <div id="logs-container" style="flex: 1; overflow-y: auto; background: var(--bg-alt); padding: 1rem; border-radius: var(--radius); border: 1px solid var(--border); font-family: monospace; font-size: 0.85rem; white-space: pre-wrap; word-break: break-word;">
-            Select a server to view logs...
+          <div id="logs-container" class="logs-container">
+            Select a server to view logs.
           </div>
         </div>
       </dialog>
     `;
 
     // ── Clear History Logic ──
+    const memoryDialog = document.getElementById('memory-dialog');
+    const memoryServerSelect = document.getElementById('memory-server-select');
+    const memorySummaryText = document.getElementById('memory-summary-text');
+    const memoryStats = document.getElementById('memory-stats');
+    const memoryMessagesList = document.getElementById('memory-messages-list');
     const clearHistoryDialog = document.getElementById('clear-history-dialog');
     const clearHistorySelect = document.getElementById('clear-history-select');
+
+    const loadMemoryServers = async () => {
+      const servers = await bots.getHistory(bot.id);
+      const choices = servers && servers.length > 0 ? servers : [{ guild_id: 'DM', message_count: 0 }];
+      memoryServerSelect.innerHTML = `<option value="">Select a server</option>` +
+        choices.map(s => `<option value="${escapeAttr(s.guild_id || 'DM')}">${serverLabel(s.guild_id)} (${s.message_count || 0} messages)</option>`).join('');
+      if (!memoryServerSelect.value && choices.length > 0) memoryServerSelect.value = choices[0].guild_id || 'DM';
+    };
+
+    const loadMemory = async () => {
+      const guildId = memoryServerSelect.value;
+      if (!guildId) {
+        memoryStats.textContent = 'Select a server.';
+        memoryMessagesList.innerHTML = 'Select a server to inspect memory.';
+        return;
+      }
+      memoryStats.textContent = 'Loading...';
+      memoryMessagesList.innerHTML = 'Loading messages...';
+      try {
+        const memory = await bots.getMemory(bot.id, guildId);
+        memorySummaryText.value = memory.summary || '';
+        memoryStats.textContent = `${memory.stats?.conversation_count || 0} saved messages, ${memory.stats?.summary_count || 0} summary block${memory.stats?.summary_count === 1 ? '' : 's'}`;
+        memoryMessagesList.innerHTML = renderMemoryMessages(memory.recent_messages || []);
+      } catch (err) {
+        memoryStats.textContent = 'Failed to load memory.';
+        memoryMessagesList.innerHTML = `<span class="log-error">Error loading memory: ${escapeHtml(err.message)}</span>`;
+      }
+    };
+
+    document.getElementById('view-memory-btn').addEventListener('click', async () => {
+      try {
+        await loadMemoryServers();
+        await loadMemory();
+        memoryDialog.showModal();
+      } catch (err) {
+        toast(err.message, 'error');
+      }
+    });
+
+    memoryServerSelect.addEventListener('change', loadMemory);
+    document.getElementById('refresh-memory-btn').addEventListener('click', loadMemory);
+    document.getElementById('save-memory-btn').addEventListener('click', async () => {
+      const guildId = memoryServerSelect.value;
+      if (!guildId) return toast('Select a server first', 'error');
+      try {
+        await bots.saveMemory(bot.id, guildId, memorySummaryText.value);
+        toast('Memory summary saved', 'success');
+        await loadMemory();
+      } catch (err) {
+        toast(err.message, 'error');
+      }
+    });
     
     document.getElementById('clear-history-btn').addEventListener('click', async () => {
       try {
@@ -729,10 +824,7 @@ export async function render(container, botId) {
       try {
         const servers = await bots.getLogServers(bot.id);
         viewLogsSelect.innerHTML = `<option value="">— Select a Server —</option>` + 
-          servers.map(s => {
-            const label = s.guild_id === 'DM' || !s.guild_id ? 'Direct Messages' : `Server ${s.guild_id}`;
-            return `<option value="${s.guild_id}">${label}</option>`;
-          }).join('');
+          servers.map(s => `<option value="${escapeAttr(s.guild_id || 'DM')}">${serverLabel(s.guild_id)}</option>`).join('');
       } catch (err) {
         toast('Failed to load log servers: ' + err.message, 'error');
       }
@@ -751,28 +843,9 @@ export async function render(container, botId) {
           logsContainer.innerHTML = 'No logs found.';
           return;
         }
-        logsContainer.innerHTML = logs.map(l => {
-          const time = new Date(l.created_at + 'Z').toLocaleString();
-          let color = '#3b82f6';
-          if (l.type === 'error') color = '#ef4444';
-          else if (l.type === 'context_built') color = '#10b981';
-          
-          let formattedContent = '';
-          try {
-            formattedContent = JSON.stringify(l.content, null, 2);
-          } catch(e) {
-            formattedContent = escapeHtml(l.content);
-          }
-
-          return `
-<div style="margin-bottom: 1rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border-light);">
-  <strong style="color: ${color};">[${escapeHtml(l.type)}]</strong> 
-  <span style="color: var(--text-secondary);">${time}</span>
-  <pre style="margin-top: 0.5rem; margin-bottom: 0;">${escapeHtml(formattedContent)}</pre>
-</div>`;
-        }).join('');
+        logsContainer.innerHTML = renderLogGroups(logs);
       } catch (err) {
-        logsContainer.innerHTML = `<span style="color:red;">Error loading logs: ${err.message}</span>`;
+        logsContainer.innerHTML = `<span class="log-error">Error loading logs: ${escapeHtml(err.message)}</span>`;
       }
     };
 
@@ -808,6 +881,11 @@ export async function render(container, botId) {
     saveBtn.disabled = true;
     saveBtn.textContent = 'Saving…';
 
+    const readNumber = (id, fallback, parser = Number.parseFloat) => {
+      const value = parser(document.getElementById(id).value, 10);
+      return Number.isFinite(value) ? value : fallback;
+    };
+
     const body = {
       name: document.getElementById('bot-name').value.trim(),
       model: document.getElementById('bot-model').value.trim(),
@@ -822,14 +900,14 @@ export async function render(container, botId) {
       first_message: document.getElementById('bot-first-msg').value,
       example_messages: document.getElementById('bot-examples').value,
       prefill: document.getElementById('bot-prefill').value,
-      temperature: parseFloat(document.getElementById('bot-temp').value),
-      top_p: parseFloat(document.getElementById('bot-topp').value),
-      max_tokens: parseInt(document.getElementById('bot-max-tokens').value),
-      max_prompt_tokens: parseInt(document.getElementById('bot-max-prompt').value),
-      presence_penalty: parseFloat(document.getElementById('bot-pp').value),
-      frequency_penalty: parseFloat(document.getElementById('bot-fp').value),
+      temperature: readNumber('bot-temp', 0.9),
+      top_p: readNumber('bot-topp', 0.9),
+      max_tokens: readNumber('bot-max-tokens', 300, Number.parseInt),
+      max_prompt_tokens: readNumber('bot-max-prompt', 10000, Number.parseInt),
+      presence_penalty: readNumber('bot-pp', 0),
+      frequency_penalty: readNumber('bot-fp', 0),
       auto_start: document.getElementById('bot-autostart').checked,
-      log_retention_days: parseInt(document.getElementById('bot-log-retention').value) ?? 7,
+      log_retention_days: readNumber('bot-log-retention', 7, Number.parseInt),
       allowed_guilds: JSON.stringify(document.getElementById('bot-allowed-guilds').value.split(',').map(s => s.trim()).filter(s => s)),
       providers_order: JSON.stringify(document.getElementById('bot-providers-order').value.split(',').map(s => s.trim()).filter(s => s)),
     };
@@ -885,6 +963,146 @@ export async function render(container, botId) {
       saveBtn.textContent = isNew ? 'Create Bot' : 'Save Changes';
     }
   });
+}
+
+function serverLabel(guildId) {
+  return guildId === 'DM' || !guildId ? 'Direct Messages' : `Server ${guildId}`;
+}
+
+function formatDate(value) {
+  if (!value) return 'Unknown time';
+  return new Date(`${value}Z`).toLocaleString();
+}
+
+function formatNumber(value) {
+  return Number.isFinite(Number(value)) ? Number(value).toLocaleString() : 'n/a';
+}
+
+function contentObject(log) {
+  return log && typeof log.content === 'object' && log.content !== null ? log.content : {};
+}
+
+function renderMemoryMessages(messages) {
+  if (!messages || messages.length === 0) {
+    return '<div class="inspector-empty">No saved conversation messages for this scope.</div>';
+  }
+
+  return messages.map(message => `
+    <div class="memory-message ${escapeAttr(message.role)}">
+      <div class="memory-message-meta">
+        <span class="role-pill ${escapeAttr(message.role)}">${escapeHtml(message.role)}</span>
+        <span>${formatDate(message.created_at)}</span>
+      </div>
+      <div class="memory-message-content">${escapeHtml(message.content)}</div>
+    </div>
+  `).join('');
+}
+
+function renderLogGroups(logs) {
+  const groups = groupLogs(logs);
+  if (groups.length === 0) return '<div class="inspector-empty">No logs found.</div>';
+  return groups.map(renderLogGroup).join('');
+}
+
+function groupLogs(logs) {
+  const sorted = [...logs].sort((a, b) => a.id - b.id);
+  const byKey = new Map();
+  let legacyIndex = 0;
+
+  for (const log of sorted) {
+    const content = contentObject(log);
+    let key = content.requestId;
+    if (!key) {
+      if (log.type === 'context_built' || log.type === 'api_request') legacyIndex += 1;
+      key = `legacy-${legacyIndex || log.id}`;
+    }
+
+    if (!byKey.has(key)) {
+      byKey.set(key, { key, logs: [], firstId: log.id, lastId: log.id });
+    }
+    const group = byKey.get(key);
+    group.logs.push(log);
+    group.firstId = Math.min(group.firstId, log.id);
+    group.lastId = Math.max(group.lastId, log.id);
+  }
+
+  return [...byKey.values()].sort((a, b) => b.lastId - a.lastId);
+}
+
+function renderLogGroup(group) {
+  const logs = group.logs;
+  const request = logs.find(log => log.type === 'api_request');
+  const response = logs.find(log => log.type === 'api_response');
+  const context = logs.find(log => log.type === 'context_built');
+  const retries = logs.filter(log => log.type === 'api_retry');
+  const requestContent = contentObject(request);
+  const responseContent = contentObject(response);
+  const contextContent = contentObject(context);
+  const usage = responseContent.usage || {};
+  const statusClass = response ? 'success' : (retries.length > 0 ? 'warning' : 'neutral');
+  const statusText = response ? 'Completed' : (retries.length > 0 ? 'Retried' : 'Log Event');
+  const title = requestContent.model || contextContent.channelId || logs[0].type;
+
+  return `
+    <article class="log-group">
+      <div class="log-group-header">
+        <div>
+          <div class="log-group-title">${escapeHtml(title)}</div>
+          <div class="log-muted">${formatDate(logs[logs.length - 1].created_at)}</div>
+        </div>
+        <span class="log-status ${statusClass}">${statusText}</span>
+      </div>
+      <div class="log-metrics">
+        ${metricHtml('Prompt', requestContent.estimatedPromptTokens || contextContent.totalTokens)}
+        ${metricHtml('Messages', requestContent.messageCount || contextContent.messageCount)}
+        ${metricHtml('Output', usage.completion_tokens)}
+        ${metricHtml('Response', responseContent.responseLength ? `${formatNumber(responseContent.responseLength)} chars` : null)}
+        ${metricHtml('Retries', retries.length)}
+        ${metricHtml('Images', requestContent.hasImages ? 'yes' : 'no')}
+      </div>
+      <div class="log-timeline">
+        ${logs.map(renderLogEvent).join('')}
+      </div>
+    </article>
+  `;
+}
+
+function metricHtml(label, value) {
+  const shown = value === undefined || value === null || value === '' ? 'n/a' : value;
+  return `<div class="log-metric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(String(shown))}</strong></div>`;
+}
+
+function renderLogEvent(log) {
+  const content = contentObject(log);
+  const summary = summarizeLogEvent(log.type, content);
+  const raw = JSON.stringify(content, null, 2);
+  return `
+    <details class="log-event">
+      <summary>
+        <span class="log-event-type ${escapeAttr(log.type)}">${escapeHtml(log.type)}</span>
+        <span>${escapeHtml(summary)}</span>
+        <time>${formatDate(log.created_at)}</time>
+      </summary>
+      <pre>${escapeHtml(raw)}</pre>
+    </details>
+  `;
+}
+
+function summarizeLogEvent(type, content) {
+  if (type === 'context_built') {
+    return `${formatNumber(content.totalTokens)} estimated tokens across ${formatNumber(content.messageCount)} messages`;
+  }
+  if (type === 'api_request') {
+    return `${content.model || 'model'} request, ${formatNumber(content.estimatedPromptTokens)} prompt tokens`;
+  }
+  if (type === 'api_retry') {
+    return `${content.failedAttempt || 'attempt'} failed; retrying ${content.nextAttempt || 'next attempt'}`;
+  }
+  if (type === 'api_response') {
+    const usage = content.usage || {};
+    return `${content.finishReason || 'finished'}, ${formatNumber(content.responseLength)} chars, ${formatNumber(usage.total_tokens)} total tokens`;
+  }
+  return typeof content === 'string' ? content : 'Log entry';
 }
 
 function escapeHtml(str) {
